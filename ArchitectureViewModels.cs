@@ -17,8 +17,8 @@ public partial class AccountViewModel : ObservableObject
     }
 
     public IrctcAccount Model { get; }
-    public string UserId => Model.Username;
     public string Username => Model.Username;
+    public string Password => PasswordCrypto.Decrypt(Model.EncryptedPassword);
     public string Proxy => Model.ProxyConfig.Address;
     public string CaptchaProvider => Model.CaptchaSettings.Provider;
     public SessionState SessionState => Model.SessionState;

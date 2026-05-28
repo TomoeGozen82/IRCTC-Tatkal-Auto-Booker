@@ -54,7 +54,7 @@ public partial class BookingSetupViewModel : ObservableObject
     [RelayCommand]
     private void Cancel()
     {
-        _log("Info", $"Booking setup closed for {Account.UserId} (Cancel).");
+        _log("Info", $"Booking setup closed for {Account.Username} (Cancel).");
         RequestClose?.Invoke(false);
     }
 
@@ -70,7 +70,7 @@ public partial class BookingSetupViewModel : ObservableObject
 
         var profile = new DomainBookingProfile
         {
-            ProfileName = $"Adhoc-{Account.UserId}-{DateTime.Now:HHmmss}",
+            ProfileName = $"Adhoc-{Account.Username}-{DateTime.Now:HHmmss}",
             FromStation = FromStation.Trim(),
             ToStation = ToStation.Trim(),
             JourneyDate = JourneyDate.Date,
@@ -94,7 +94,7 @@ public partial class BookingSetupViewModel : ObservableObject
             }).ToList()
         };
 
-        _log("Info", $"Booking saved: account={Account.UserId}, from={profile.FromStation}, to={profile.ToStation}, date={profile.JourneyDate:dd-MMM-yyyy}, quota={profile.Quota}, trains={profile.PreferredTrainNumbers}, class={profile.ClassPriority}, pax={profile.PassengerList.Count}");
+        _log("Info", $"Booking saved: account={Account.Username}, from={profile.FromStation}, to={profile.ToStation}, date={profile.JourneyDate:dd-MMM-yyyy}, quota={profile.Quota}, trains={profile.PreferredTrainNumbers}, class={profile.ClassPriority}, pax={profile.PassengerList.Count}");
         StartRequested?.Invoke(profile);
         RequestClose?.Invoke(true);
     }

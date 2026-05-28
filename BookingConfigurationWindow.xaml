@@ -94,7 +94,7 @@
                                             <ColumnDefinition Width="Auto" />
                                         </Grid.ColumnDefinitions>
                                         <CheckBox IsChecked="{Binding IsSelected}" VerticalAlignment="Center" />
-                                        <TextBlock Grid.Column="1" Margin="8,0,0,0" Text="{Binding Account.UserId}" />
+                                        <TextBlock Grid.Column="1" Margin="8,0,0,0" Text="{Binding Account.Username}" />
                                         <TextBlock Grid.Column="2" Opacity="0.7" Text="{Binding Account.Status}" />
                                     </Grid>
                                 </DataTemplate>

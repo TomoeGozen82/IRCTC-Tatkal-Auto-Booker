@@ -20,7 +20,7 @@ public sealed class BookingService
         try
         {
             account.UpdateStatus("Initializing");
-            Log(account.UserId, "Info", "Launching browser session.");
+            Log(account.Username, "Info", "Launching browser session.");
 
             using var playwright = await Playwright.CreateAsync();
             await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
@@ -56,25 +56,25 @@ public sealed class BookingService
             await SolveCaptchaAndSubmitAsync(page, account, profile, cancellationToken);
 
             account.UpdateStatus("PaymentReached");
-            Log(account.UserId, "Success", "Booking reached payment page.");
+            Log(account.Username, "Success", "Booking reached payment page.");
             return new BookingResult(BookingRunStatus.PaymentReached, "Reached payment page successfully.");
         }
         catch (OperationCanceledException)
         {
             account.UpdateStatus("Stopped");
-            Log(account.UserId, "Info", "Booking cancelled by user.");
+            Log(account.Username, "Info", "Booking cancelled by user.");
             return new BookingResult(BookingRunStatus.Failed, "Booking cancelled.");
         }
         catch (TimeoutException ex)
         {
             account.UpdateStatus("Failed");
-            Log(account.UserId, "Error", $"Timeout: {ex.Message}");
+            Log(account.Username, "Error", $"Timeout: {ex.Message}");
             return new BookingResult(BookingRunStatus.Failed, $"Timeout occurred: {ex.Message}");
         }
         catch (Exception ex)
         {
             account.UpdateStatus("Failed");
-            Log(account.UserId, "Error", $"Unexpected failure: {ex.Message}");
+            Log(account.Username, "Error", $"Unexpected failure: {ex.Message}");
             return new BookingResult(BookingRunStatus.Failed, ex.Message);
         }
     }
@@ -83,7 +83,7 @@ public sealed class BookingService
     {
         account.UpdateStatus("Logging In");
         account.UpdateLastAction("Navigating to IRCTC login.");
-        Log(account.UserId, "Info", "Navigating to IRCTC login page.");
+        Log(account.Username, "Info", "Navigating to IRCTC login page.");
         cancellationToken.ThrowIfCancellationRequested();
 
         await page.GotoAsync("https://www.irctc.co.in/nget/train-search", new PageGotoOptions
@@ -93,22 +93,22 @@ public sealed class BookingService
         });
 
         account.UpdateLastAction("Opening login modal.");
-        Log(account.UserId, "Info", "Opening login modal.");
+        Log(account.Username, "Info", "Opening login modal.");
         await OpenLoginModalAsync(page, cancellationToken);
 
         var password = account.GetDecryptedPassword();
-        if (string.IsNullOrWhiteSpace(account.UserId) || string.IsNullOrWhiteSpace(password))
+        if (string.IsNullOrWhiteSpace(account.Username) || string.IsNullOrWhiteSpace(password))
         {
             throw new InvalidOperationException("IRCTC username or password is missing for this account.");
         }
 
         account.UpdateLastAction("Entering credentials.");
-        Log(account.UserId, "Info", "Typing username and password in login modal.");
-        await FillLoginFormAndSubmitAsync(page, account.UserId, password, cancellationToken);
+        Log(account.Username, "Info", "Typing username and password in login modal.");
+        await FillLoginFormAndSubmitAsync(page, account.Username, password, cancellationToken);
 
         await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
         account.UpdateLastAction("Login submitted.");
-        Log(account.UserId, "Info", "Login submitted.");
+        Log(account.Username, "Info", "Login submitted.");
     }
 
     private static async Task FillLoginFormAndSubmitAsync(
@@ -188,7 +188,7 @@ public sealed class BookingService
     {
         account.UpdateStatus("Searching");
         account.UpdateLastAction("Filling search criteria.");
-        Log(account.UserId, "Info", "Setting source, destination, date and Tatkal quota.");
+        Log(account.Username, "Info", "Setting source, destination, date and Tatkal quota.");
         cancellationToken.ThrowIfCancellationRequested();
 
         await page.FillAsync("input[aria-controls='pr_id_1_list']", profile.FromStation);
@@ -200,7 +200,7 @@ public sealed class BookingService
         await ClickWithFallbackAsync(page, "button:has-text('Search')", cancellationToken);
         await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
         account.UpdateLastAction("Train search submitted.");
-        Log(account.UserId, "Info", "Train search submitted.");
+        Log(account.Username, "Info", "Train search submitted.");
     }
 
     private async Task EnterBookingLoopAsync(
@@ -210,7 +210,7 @@ public sealed class BookingService
         CancellationToken cancellationToken)
     {
         account.UpdateStatus("Watching Availability");
-        Log(account.UserId, "Info", $"Entering booking loop for {profile.TrainNumber} / {profile.TravelClass}.");
+        Log(account.Username, "Info", $"Entering booking loop for {profile.TrainNumber} / {profile.TravelClass}.");
 
         for (var attempt = 1; attempt <= profile.MaxRefreshAttempts; attempt++)
         {
@@ -230,13 +230,13 @@ public sealed class BookingService
             {
                 account.UpdateStatus("Booking");
                 account.UpdateLastAction("Book Now available.");
-                Log(account.UserId, "Success", "Book Now found, opening passenger page.");
+                Log(account.Username, "Success", "Book Now found, opening passenger page.");
                 await bookNowButton.First.ClickAsync();
                 await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
                 return;
             }
 
-            Log(account.UserId, "Info", $"Book Now not available (attempt {attempt}).");
+            Log(account.Username, "Info", $"Book Now not available (attempt {attempt}).");
             await Task.Delay(profile.RefreshIntervalMs, cancellationToken);
         }
 
@@ -251,7 +251,7 @@ public sealed class BookingService
     {
         account.UpdateStatus("Passenger Fill");
         account.UpdateLastAction("Entering passenger details.");
-        Log(account.UserId, "Info", "Filling passenger details.");
+        Log(account.Username, "Info", "Filling passenger details.");
 
         for (var i = 0; i < profile.Passengers.Count; i++)
         {
@@ -265,7 +265,7 @@ public sealed class BookingService
         }
 
         account.UpdateLastAction("Passenger details entered.");
-        Log(account.UserId, "Success", "Passenger details submitted.");
+        Log(account.Username, "Success", "Passenger details submitted.");
     }
 
     private async Task SolveCaptchaAndSubmitAsync(
@@ -276,7 +276,7 @@ public sealed class BookingService
     {
         account.UpdateStatus("Captcha");
         account.UpdateLastAction("Waiting for captcha solve.");
-        Log(account.UserId, "Info", "Solving captcha with 2Captcha.");
+        Log(account.Username, "Info", "Solving captcha with 2Captcha.");
 
         var captchaImage = page.Locator("img.captcha-img");
         await captchaImage.WaitForAsync(new LocatorWaitForOptions { Timeout = profile.DefaultTimeoutMs });

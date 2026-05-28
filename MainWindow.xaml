@@ -140,7 +140,8 @@
                                           IsReadOnly="True"
                                           HeadersVisibility="Column">
                                     <DataGrid.Columns>
-                                        <DataGridTextColumn Header="User ID" Binding="{Binding UserId}" Width="2*" />
+                                        <DataGridTextColumn Header="Username" Binding="{Binding Username}" Width="1.6*" />
+                                        <DataGridTextColumn Header="Password" Binding="{Binding PasswordDisplay}" Width="1.4*" />
                                         <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="*" />
                                         <DataGridTextColumn Header="Proxy" Binding="{Binding Proxy}" Width="*" />
                                         <DataGridTextColumn Header="Last Login" Binding="{Binding LastLoginDisplay}" Width="2*" />
@@ -234,7 +235,8 @@
                                       CanUserAddRows="False"
                                       IsReadOnly="True">
                                 <DataGrid.Columns>
-                                    <DataGridTextColumn Header="User ID" Binding="{Binding UserId}" Width="1.6*" />
+                                    <DataGridTextColumn Header="Username" Binding="{Binding Username}" Width="1.4*" />
+                                    <DataGridTextColumn Header="Password" Binding="{Binding Password}" Width="1.4*" />
                                     <DataGridTextColumn Header="Session" Binding="{Binding SessionState}" Width="*" />
                                     <DataGridTextColumn Header="Proxy" Binding="{Binding Proxy}" Width="1.3*" />
                                 </DataGrid.Columns>

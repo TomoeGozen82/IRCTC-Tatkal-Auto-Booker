@@ -20,12 +20,11 @@
                    FontWeight="SemiBold" />
 
         <StackPanel Grid.Row="1" Margin="0,14,0,0">
-            <TextBox Text="{Binding AccountForm.UserId, UpdateSourceTrigger=PropertyChanged}"
-                     materialDesign:HintAssist.Hint="User ID" />
-            <PasswordBox x:Name="AccountPasswordBox"
-                         Margin="0,10,0,0"
-                         PasswordChanged="AccountPasswordBox_OnPasswordChanged"
-                         materialDesign:HintAssist.Hint="Password" />
+            <TextBox Text="{Binding AccountForm.Username, UpdateSourceTrigger=PropertyChanged}"
+                     materialDesign:HintAssist.Hint="Username" />
+            <TextBox Margin="0,10,0,0"
+                     Text="{Binding AccountForm.PlainPassword, UpdateSourceTrigger=PropertyChanged}"
+                     materialDesign:HintAssist.Hint="Password" />
             <TextBox Margin="0,10,0,0"
                      Text="{Binding AccountForm.Proxy, UpdateSourceTrigger=PropertyChanged}"
                      materialDesign:HintAssist.Hint="Proxy (SOCKS5, optional)" />

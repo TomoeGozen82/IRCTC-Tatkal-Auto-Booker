@@ -20,7 +20,7 @@
 
         <ScrollViewer VerticalScrollBarVisibility="Auto">
             <StackPanel>
-                <TextBlock Text="{Binding Account.UserId, StringFormat=Booking Setup for: {0}}"
+                <TextBlock Text="{Binding Account.Username, StringFormat=Booking Setup for: {0}}"
                            FontSize="22"
                            FontWeight="SemiBold"
                            Margin="0,0,0,12" />

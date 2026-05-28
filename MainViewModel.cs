@@ -1,8 +1,6 @@
 using System;
 using System.Collections.ObjectModel;
 using System.Linq;
-using System.Security.Cryptography;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -207,20 +205,18 @@ public partial class MainViewModel : ObservableObject
         if (SelectedAccountItem is null)
         {
             return;
-    }
-
-        SelectedAccount = Accounts.FirstOrDefault(a => a.UserId == SelectedAccountItem.UserId);
-        if (SelectedAccount is null)
-        {
-            return;
         }
+
+        var domain = SelectedAccountItem.Model;
+        SelectedAccount = Accounts.FirstOrDefault(a => a.Id == domain.Id);
 
         IsEditMode = true;
         AccountForm = new AccountFormModel
         {
-            UserId = SelectedAccount.UserId,
-            Proxy = SelectedAccount.Proxy,
-            IsEnabled = SelectedAccount.IsEnabled
+            Username = domain.Username,
+            PlainPassword = PasswordCrypto.Decrypt(domain.EncryptedPassword),
+            Proxy = domain.ProxyConfig.Address,
+            IsEnabled = domain.IsEnabled
         };
         AccountFormRequested?.Invoke();
     }
@@ -229,11 +225,11 @@ public partial class MainViewModel : ObservableObject
     {
         if (!_accountBookingProfiles.TryGetValue(accountItem.Model.Id, out var profile))
         {
-            AddLog("Error", $"No booking configured for {accountItem.UserId}. Use Book first.");
+            AddLog("Error", $"No booking configured for {accountItem.Username}. Use Book first.");
             return;
         }
 
-        AddLog("Info", $"Starting action for {accountItem.UserId} with saved booking.");
+        AddLog("Info", $"Starting action for {accountItem.Username} with saved booking.");
         _ = LaunchJobsAsync(profile, [accountItem.Model]);
     }
 
@@ -286,36 +282,37 @@ public partial class MainViewModel : ObservableObject
     [RelayCommand]
     private async Task SaveAccountAsync()
     {
-        if (string.IsNullOrWhiteSpace(AccountForm.UserId))
+        if (string.IsNullOrWhiteSpace(AccountForm.Username))
         {
-            AddLog("Error", "User ID is required.");
+            AddLog("Error", "Username is required.");
             return;
         }
 
-        if (!IsEditMode && string.IsNullOrWhiteSpace(AccountForm.PlainPassword))
+        if (string.IsNullOrWhiteSpace(AccountForm.PlainPassword))
         {
-            AddLog("Error", "Password is required for new accounts.");
+            AddLog("Error", "Password is required.");
             return;
         }
 
-        if (IsEditMode && SelectedAccount is not null)
+        if (IsEditMode && SelectedAccountItem is not null)
         {
-            SelectedAccount.UserId = AccountForm.UserId.Trim();
-            SelectedAccount.Proxy = AccountForm.Proxy.Trim();
-            SelectedAccount.IsEnabled = AccountForm.IsEnabled;
-            if (!string.IsNullOrWhiteSpace(AccountForm.PlainPassword))
-            {
-                SelectedAccount.SetPassword(AccountForm.PlainPassword);
-            }
+            var domain = SelectedAccountItem.Model;
+            var username = AccountForm.Username.Trim();
+            var encryptedPassword = PasswordCrypto.Encrypt(AccountForm.PlainPassword);
 
-            AddLog("Success", $"Updated account {SelectedAccount.UserId}.");
-            SyncDomainAccountFromLegacy(SelectedAccount);
+            domain.Username = username;
+            domain.EncryptedPassword = encryptedPassword;
+            domain.ProxyConfig.Address = AccountForm.Proxy.Trim();
+            domain.IsEnabled = AccountForm.IsEnabled;
+
+            SyncLegacyAccountFromDomain(domain);
             RefreshAccountItems();
+            AddLog("Success", $"Updated account {username}.");
         }
         else
         {
             var account = AccountModel.Create(
-                AccountForm.UserId.Trim(),
+                AccountForm.Username.Trim(),
                 AccountForm.PlainPassword,
                 "Ready",
                 AccountForm.Proxy.Trim());
@@ -323,7 +320,7 @@ public partial class MainViewModel : ObservableObject
             Accounts.Add(account);
             IrctcAccounts.Add(ToIrctcAccount(account));
             RefreshAccountItems();
-            AddLog("Success", $"Added account {account.UserId}.");
+            AddLog("Success", $"Added account {account.Username}.");
         }
 
         AccountFormCloseRequested?.Invoke();
@@ -339,15 +336,15 @@ public partial class MainViewModel : ObservableObject
             return;
         }
 
-        var removedUserId = SelectedAccountItem.UserId;
-        var confirmed = DeleteAccountConfirmationRequested?.Invoke(removedUserId) ?? false;
+        var removedUsername = SelectedAccountItem.Username;
+        var confirmed = DeleteAccountConfirmationRequested?.Invoke(removedUsername) ?? false;
         if (!confirmed)
         {
             return;
         }
 
         var domainAccount = SelectedAccountItem.Model;
-        var legacyAccount = Accounts.FirstOrDefault(a => a.UserId == removedUserId);
+        var legacyAccount = Accounts.FirstOrDefault(a => a.Id == domainAccount.Id);
         if (legacyAccount is not null)
         {
             Accounts.Remove(legacyAccount);
@@ -358,7 +355,7 @@ public partial class MainViewModel : ObservableObject
         SelectedAccountItem = null;
         SelectedAccount = null;
         RefreshAccountItems();
-        AddLog("Info", $"Removed account {removedUserId}.");
+        AddLog("Info", $"Removed account {removedUsername}.");
         OnPropertyChanged(nameof(ActiveAccountsText));
         _ = PersistStateAsync();
     }
@@ -394,6 +391,7 @@ public partial class MainViewModel : ObservableObject
 
     partial void OnSelectedAccountItemChanged(AccountViewModel? value)
     {
+        SelectedAccount = value is null ? null : Accounts.FirstOrDefault(a => a.Id == value.Model.Id);
         BookSelectedAccountCommand.NotifyCanExecuteChanged();
         ToggleSelectedAccountActionCommand.NotifyCanExecuteChanged();
         EditAccountCommand.NotifyCanExecuteChanged();
@@ -472,7 +470,7 @@ public partial class MainViewModel : ObservableObject
         catch (Exception ex)
         {
             account.UpdateStatus("Invalid");
-            AddLog("Error", $"{account.UserId}: {ex.Message}");
+            AddLog("Error", $"{account.Username}: {ex.Message}");
         }
         finally
         {
@@ -598,7 +596,7 @@ public partial class MainViewModel : ObservableObject
             return;
         }
 
-        AddLog("Info", $"Stop requested for account {accountItem.UserId}.");
+        AddLog("Info", $"Stop requested for account {accountItem.Username}.");
         activeJob.Model.CancellationSource.Cancel();
     }
 
@@ -673,7 +671,8 @@ public partial class MainViewModel : ObservableObject
     {
         return new DomainIrctcAccount
         {
-            Username = account.UserId,
+            Id = account.Id,
+            Username = account.Username,
             EncryptedPassword = account.Password,
             ProxyConfig = new ProxyConfig { Address = account.Proxy },
             CaptchaSettings = new CaptchaSettings(),
@@ -686,7 +685,8 @@ public partial class MainViewModel : ObservableObject
     {
         return new AccountModel
         {
-            UserId = account.Username,
+            Id = account.Id,
+            Username = account.Username,
             Password = account.EncryptedPassword,
             Proxy = account.ProxyConfig.Address,
             Status = "Ready",
@@ -694,22 +694,20 @@ public partial class MainViewModel : ObservableObject
         };
     }
 
-    private void SyncDomainAccountFromLegacy(AccountModel legacy)
+    private void SyncLegacyAccountFromDomain(IrctcAccount domain)
     {
-        var existing = IrctcAccounts.FirstOrDefault(a => a.Username == legacy.UserId);
-        if (existing is null)
+        var legacy = Accounts.FirstOrDefault(a => a.Id == domain.Id);
+        if (legacy is null)
         {
-            IrctcAccounts.Add(ToIrctcAccount(legacy));
+            Accounts.Add(ToLegacyAccount(domain));
             return;
         }
 
-        existing.EncryptedPassword = legacy.Password;
-        existing.ProxyConfig.Address = legacy.Proxy;
-        existing.IsEnabled = legacy.IsEnabled;
-        existing.SessionState = legacy.Status.Equals("Ready", StringComparison.OrdinalIgnoreCase)
-            ? SessionState.Idle
-            : SessionState.Failed;
-        RefreshAccountItems();
+        legacy.Username = domain.Username;
+        legacy.Password = domain.EncryptedPassword;
+        legacy.Proxy = domain.ProxyConfig.Address;
+        legacy.IsEnabled = domain.IsEnabled;
+        legacy.NotifyPasswordDisplayChanged();
     }
 
     private static BookingProfile ToLegacyProfile(DomainBookingProfile profile)
@@ -799,7 +797,7 @@ public partial class MainViewModel : ObservableObject
 
     private void OnBookRequestedForAccount(AccountViewModel accountItem)
     {
-        AddLog("Info", $"Booking setup window opened for account {accountItem.UserId}.");
+        AddLog("Info", $"Booking setup window opened for account {accountItem.Username}.");
         var setup = new BookingSetupViewModel(
             accountItem,
             quotaOptions: ["TATKAL", "GENERAL", "PREMIUM TATKAL"],
@@ -809,7 +807,7 @@ public partial class MainViewModel : ObservableObject
         setup.StartRequested += profile =>
         {
             _accountBookingProfiles[accountItem.Model.Id] = profile;
-            AddLog("Success", $"Booking saved for {accountItem.UserId}. Use Start to run.");
+            AddLog("Success", $"Booking saved for {accountItem.Username}. Use Start to run.");
             _ = PersistStateAsync();
             UpdateSelectedAccountActionButton();
             ToggleSelectedAccountActionCommand.NotifyCanExecuteChanged();
@@ -835,7 +833,9 @@ public partial class MainViewModel : ObservableObject
 
 public partial class AccountModel : ObservableObject
 {
-    [ObservableProperty] private string userId = string.Empty;
+    public Guid Id { get; set; } = Guid.NewGuid();
+
+    [ObservableProperty] private string username = string.Empty;
     [ObservableProperty] private string password = string.Empty;
     [ObservableProperty] private string status = "Ready";
     [ObservableProperty] private bool isEnabled = true;
@@ -845,13 +845,23 @@ public partial class AccountModel : ObservableObject
 
     public string LastLoginDisplay => LastSuccessfulLogin == DateTime.MinValue ? "Never" : LastSuccessfulLogin.ToString("dd-MMM-yyyy HH:mm");
 
+    public string PasswordDisplay => PasswordCrypto.Decrypt(Password);
+
     partial void OnLastSuccessfulLoginChanged(DateTime value) => OnPropertyChanged(nameof(LastLoginDisplay));
 
-    public static AccountModel Create(string userId, string plainPassword, string status, string proxy)
+    partial void OnPasswordChanged(string value)
+    {
+        OnPropertyChanged(nameof(PasswordDisplay));
+    }
+
+    public void NotifyPasswordDisplayChanged() => OnPropertyChanged(nameof(PasswordDisplay));
+
+    public static AccountModel Create(string username, string plainPassword, string status, string proxy)
     {
         var model = new AccountModel
         {
-            UserId = userId,
+            Id = Guid.NewGuid(),
+            Username = username,
             Status = status,
             Proxy = proxy,
             LastSuccessfulLogin = DateTime.Now
@@ -862,29 +872,10 @@ public partial class AccountModel : ObservableObject
 
     public void SetPassword(string plainPassword)
     {
-        var bytes = Encoding.UTF8.GetBytes(plainPassword);
-        var encrypted = ProtectedData.Protect(bytes, null, DataProtectionScope.CurrentUser);
-        Password = Convert.ToBase64String(encrypted);
+        Password = PasswordCrypto.Encrypt(plainPassword);
     }
 
-    public string GetDecryptedPassword()
-    {
-        if (string.IsNullOrWhiteSpace(Password))
-        {
-            return string.Empty;
-        }
-
-        try
-        {
-            var encrypted = Convert.FromBase64String(Password);
-            var decrypted = ProtectedData.Unprotect(encrypted, null, DataProtectionScope.CurrentUser);
-            return Encoding.UTF8.GetString(decrypted);
-        }
-        catch
-        {
-            return string.Empty;
-        }
-    }
+    public string GetDecryptedPassword() => PasswordCrypto.Decrypt(Password);
 
     public void UpdateStatus(string newStatus) => UpdateOnUi(() => Status = newStatus);
     public void UpdateLastAction(string newAction) => UpdateOnUi(() => LastAction = newAction);
@@ -904,7 +895,7 @@ public partial class AccountModel : ObservableObject
 
 public partial class AccountFormModel : ObservableObject
 {
-    [ObservableProperty] private string userId = string.Empty;
+    [ObservableProperty] private string username = string.Empty;
     [ObservableProperty] private string plainPassword = string.Empty;
     [ObservableProperty] private string proxy = string.Empty;
     [ObservableProperty] private bool isEnabled = true;

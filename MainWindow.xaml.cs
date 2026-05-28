@@ -71,8 +71,8 @@ public partial class MainWindow : Window
 
         if (_accountFormWindow is { IsLoaded: true })
         {
-            _accountFormWindow.Activate();
-            return;
+            _accountFormWindow.Close();
+            _accountFormWindow = null;
         }
 
         _accountFormWindow = new AccountFormWindow(vm)
@@ -88,10 +88,10 @@ public partial class MainWindow : Window
         _accountFormWindow?.Close();
     }
 
-    private bool ConfirmDeleteAccount(string userId) =>
+    private bool ConfirmDeleteAccount(string username) =>
         MessageBox.Show(
             this,
-            $"Are you sure you want to delete account \"{userId}\"?\n\nThis cannot be undone.",
+            $"Are you sure you want to delete account \"{username}\"?\n\nThis cannot be undone.",
             "Delete Account",
             MessageBoxButton.YesNo,
             MessageBoxImage.Warning) == MessageBoxResult.Yes;
