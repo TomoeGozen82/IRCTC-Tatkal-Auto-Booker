@@ -96,29 +96,88 @@ public sealed class BookingService
         Log(account.UserId, "Info", "Opening login modal.");
         await OpenLoginModalAsync(page, cancellationToken);
 
-        var usernameField = page.Locator("form[formcontrolname='loginForm'] input[formcontrolname='userId']").First;
-        await usernameField.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
+        var password = account.GetDecryptedPassword();
+        if (string.IsNullOrWhiteSpace(account.UserId) || string.IsNullOrWhiteSpace(password))
+        {
+            throw new InvalidOperationException("IRCTC username or password is missing for this account.");
+        }
 
-        account.UpdateLastAction("Entering username.");
-        Log(account.UserId, "Info", "Typing username.");
-        await TypeSequentiallyAsync(usernameField, account.UserId, cancellationToken);
-
-        account.UpdateLastAction("Entering password.");
-        Log(account.UserId, "Info", "Typing password.");
-        var passwordField = page.Locator("input[formcontrolname='password']").First;
-        await TypeSequentiallyAsync(passwordField, account.GetDecryptedPassword(), cancellationToken);
-
-        account.UpdateLastAction("Clicking SIGN IN.");
-        Log(account.UserId, "Info", "Clicking SIGN IN.");
-        await ClickWithFallbackAsync(
-            page,
-            "form[formcontrolname='loginForm'] button.search_btn.train_Search[type='submit'], " +
-            "form[formcontrolname='loginForm'] button:has-text('SIGN IN')",
-            cancellationToken);
+        account.UpdateLastAction("Entering credentials.");
+        Log(account.UserId, "Info", "Typing username and password in login modal.");
+        await FillLoginFormAndSubmitAsync(page, account.UserId, password, cancellationToken);
 
         await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
         account.UpdateLastAction("Login submitted.");
         Log(account.UserId, "Info", "Login submitted.");
+    }
+
+    private static async Task FillLoginFormAndSubmitAsync(
+        IPage page,
+        string username,
+        string password,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var loginForm = page.Locator("form[formcontrolname='loginForm']");
+        await loginForm.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15_000
+        });
+
+        var usernameField = loginForm.Locator("input[formcontrolname='userId']");
+        var passwordField = loginForm.Locator("input[formcontrolname='password']");
+
+        await usernameField.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
+        await passwordField.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
+
+        await TypeIntoLoginFieldAsync(page, usernameField, username, cancellationToken);
+        await TypeIntoLoginFieldAsync(page, passwordField, password, cancellationToken);
+
+        var signInButton = loginForm
+            .Locator("button[type='submit'].search_btn.train_Search")
+            .Filter(new LocatorFilterOptions { HasText = "SIGN IN" });
+
+        if (await signInButton.CountAsync() == 0)
+        {
+            signInButton = loginForm.GetByRole(AriaRole.Button, new() { Name = "SIGN IN", Exact = true });
+        }
+
+        await signInButton.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
+        await signInButton.ScrollIntoViewIfNeededAsync();
+
+        try
+        {
+            await signInButton.ClickAsync(new LocatorClickOptions { Timeout = 8_000 });
+        }
+        catch (PlaywrightException)
+        {
+            await signInButton.EvaluateAsync("node => node.click()");
+        }
+    }
+
+    private static async Task TypeIntoLoginFieldAsync(
+        IPage page,
+        ILocator field,
+        string text,
+        CancellationToken cancellationToken,
+        int delayMs = 80)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        await field.ScrollIntoViewIfNeededAsync();
+        await field.ClickAsync(new LocatorClickOptions { Force = true, Timeout = 5_000 });
+
+        // Clear any existing value so sequential typing starts from an empty field.
+        await field.FillAsync(string.Empty);
+        await page.Keyboard.PressAsync("Control+A");
+        await page.Keyboard.PressAsync("Backspace");
+
+        await field.PressSequentiallyAsync(text, new LocatorPressSequentiallyOptions { Delay = delayMs });
+        await field.DispatchEventAsync("input");
+        await field.DispatchEventAsync("change");
+        await field.BlurAsync();
     }
 
     private async Task SearchTrainAsync(
@@ -417,17 +476,6 @@ public sealed class BookingService
         }
 
         return true;
-    }
-
-    private static async Task TypeSequentiallyAsync(
-        ILocator field,
-        string text,
-        CancellationToken cancellationToken,
-        int delayMs = 80)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        await field.ClickAsync();
-        await field.PressSequentiallyAsync(text, new LocatorPressSequentiallyOptions { Delay = delayMs });
     }
 
     private static async Task ClickWithFallbackAsync(IPage page, string selector, CancellationToken cancellationToken)
