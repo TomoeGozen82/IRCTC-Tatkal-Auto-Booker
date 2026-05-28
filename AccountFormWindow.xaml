@@ -1,0 +1,53 @@
+<Window x:Class="Booking.AccountFormWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes"
+        Title="Add / Edit Account"
+        Height="380"
+        Width="440"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource MaterialDesignPaper}">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Text="Add / Edit Account"
+                   FontSize="22"
+                   FontWeight="SemiBold" />
+
+        <StackPanel Grid.Row="1" Margin="0,14,0,0">
+            <TextBox Text="{Binding AccountForm.UserId, UpdateSourceTrigger=PropertyChanged}"
+                     materialDesign:HintAssist.Hint="User ID" />
+            <PasswordBox x:Name="AccountPasswordBox"
+                         Margin="0,10,0,0"
+                         PasswordChanged="AccountPasswordBox_OnPasswordChanged"
+                         materialDesign:HintAssist.Hint="Password" />
+            <TextBox Margin="0,10,0,0"
+                     Text="{Binding AccountForm.Proxy, UpdateSourceTrigger=PropertyChanged}"
+                     materialDesign:HintAssist.Hint="Proxy (SOCKS5, optional)" />
+            <CheckBox Margin="0,10,0,0"
+                      Content="Enable Account"
+                      IsChecked="{Binding AccountForm.IsEnabled}" />
+            <TextBlock Margin="0,10,0,0"
+                       Text="{Binding AccountForm.Status, StringFormat=Status: {0}}"
+                       Opacity="0.8" />
+        </StackPanel>
+
+        <StackPanel Grid.Row="2"
+                    Orientation="Horizontal"
+                    HorizontalAlignment="Right"
+                    Margin="0,16,0,0">
+            <Button Content="Save"
+                    Margin="0,0,8,0"
+                    Style="{StaticResource MaterialDesignRaisedButton}"
+                    Command="{Binding SaveAccountCommand}" />
+            <Button Content="Cancel"
+                    Style="{StaticResource MaterialDesignOutlinedButton}"
+                    Click="CancelButton_OnClick" />
+        </StackPanel>
+    </Grid>
+</Window>

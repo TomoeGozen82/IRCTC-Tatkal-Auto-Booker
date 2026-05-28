@@ -1,0 +1,35 @@
+<Window x:Class="Booking.SettingsWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes"
+        Title="Settings"
+        Height="280"
+        Width="460"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource MaterialDesignPaper}">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Text="Settings" FontSize="22" FontWeight="SemiBold" />
+
+        <StackPanel Grid.Row="1" Margin="0,16,0,0">
+            <CheckBox Content="Enable Auto Refresh" IsChecked="{Binding EnableAutoRefresh}" />
+            <CheckBox Content="Use Proxy" IsChecked="{Binding UseProxy}" Margin="0,8,0,0" />
+            <TextBlock Text="More settings can be added here."
+                       Opacity="0.7"
+                       Margin="0,16,0,0" />
+        </StackPanel>
+
+        <Button Grid.Row="2"
+                Content="Close"
+                HorizontalAlignment="Right"
+                Margin="0,16,0,0"
+                Style="{StaticResource MaterialDesignOutlinedButton}"
+                Click="CloseButton_OnClick" />
+    </Grid>
+</Window>
