@@ -7,6 +7,8 @@ namespace Booking;
 public sealed class BookingService
 {
     private static readonly HttpClient HttpClient = new();
+    private const int DesktopViewportWidth = 1920;
+    private const int DesktopViewportHeight = 1080;
 
     public event Action<ServiceLog>? LogEmitted;
 
@@ -25,17 +27,27 @@ public sealed class BookingService
             {
                 // Always run with a visible browser window for easier monitoring/debugging.
                 Headless = false,
-                Args = ["--disable-blink-features=AutomationControlled", "--start-maximized"]
+                Args =
+                [
+                    "--disable-blink-features=AutomationControlled",
+                    "--start-maximized",
+                    $"--window-size={DesktopViewportWidth},{DesktopViewportHeight}"
+                ]
             });
 
             await using var context = await browser.NewContextAsync(new BrowserNewContextOptions
             {
                 IgnoreHTTPSErrors = true,
-                ViewportSize = null
+                // Fixed desktop viewport so IRCTC shows the full header (LOGIN / REGISTER), not the mobile hamburger menu.
+                ViewportSize = new ViewportSize { Width = DesktopViewportWidth, Height = DesktopViewportHeight },
+                ScreenSize = new ScreenSize { Width = DesktopViewportWidth, Height = DesktopViewportHeight },
+                IsMobile = false,
+                HasTouch = false
             });
 
             var page = await context.NewPageAsync();
             page.SetDefaultTimeout(profile.DefaultTimeoutMs);
+            await page.SetViewportSizeAsync(DesktopViewportWidth, DesktopViewportHeight);
 
             await LoginAsync(page, account, cancellationToken);
             await SearchTrainAsync(page, account, profile, cancellationToken);
