@@ -88,17 +88,15 @@ public sealed class BookingService
 
         await page.GotoAsync("https://www.irctc.co.in/nget/train-search", new PageGotoOptions
         {
-            WaitUntil = WaitUntilState.NetworkIdle
+            WaitUntil = WaitUntilState.DOMContentLoaded,
+            Timeout = 60_000
         });
 
         account.UpdateLastAction("Opening login modal.");
         Log(account.UserId, "Info", "Opening login modal.");
-        await ClickWithFallbackAsync(
-            page,
-            "a.search_btn.loginText, a[aria-label='Click here to Login in application'], a:has-text('LOGIN / REGISTER')",
-            cancellationToken);
+        await OpenLoginModalAsync(page, cancellationToken);
 
-        var usernameField = page.Locator("input[formcontrolname='userId']").First;
+        var usernameField = page.Locator("form[formcontrolname='loginForm'] input[formcontrolname='userId']").First;
         await usernameField.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15000 });
 
         account.UpdateLastAction("Entering username.");
@@ -288,6 +286,137 @@ public sealed class BookingService
         }
 
         throw new TimeoutException("Captcha solve timed out.");
+    }
+
+    private static async Task OpenLoginModalAsync(IPage page, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        // IRCTC is an Angular SPA; header controls render after DOMContentLoaded.
+        await page.WaitForLoadStateAsync(LoadState.Load);
+        await TryDismissBlockingOverlaysAsync(page);
+
+        var loginModalInput = page.Locator("form[formcontrolname='loginForm'] input[formcontrolname='userId']");
+        if (await loginModalInput.IsVisibleAsync())
+        {
+            return;
+        }
+
+        var loginButtonCandidates = new ILocator[]
+        {
+            page.GetByLabel("Click here to Login in application"),
+            page.Locator("nav.nav-bar a.search_btn.loginText"),
+            page.Locator("a.search_btn.loginText"),
+            page.GetByRole(AriaRole.Link, new() { Name = "LOGIN / REGISTER", Exact = true })
+        };
+
+        foreach (var candidate in loginButtonCandidates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!await ClickFirstVisibleAsync(candidate, cancellationToken))
+            {
+                continue;
+            }
+
+            try
+            {
+                await loginModalInput.WaitForAsync(new LocatorWaitForOptions
+                {
+                    State = WaitForSelectorState.Visible,
+                    Timeout = 8_000
+                });
+                return;
+            }
+            catch (TimeoutException)
+            {
+                // Try the next selector strategy.
+            }
+        }
+
+        throw new TimeoutException("Could not open the LOGIN / REGISTER modal.");
+    }
+
+    private static async Task TryDismissBlockingOverlaysAsync(IPage page)
+    {
+        var dismissSelectors = new[]
+        {
+            "button:has-text('OK')",
+            "button:has-text('Close')",
+            "button:has-text('Accept')",
+            ".modal-dialog button.close",
+            "img[alt='Close']"
+        };
+
+        foreach (var selector in dismissSelectors)
+        {
+            var button = page.Locator(selector).First;
+            if (await button.IsVisibleAsync())
+            {
+                try
+                {
+                    await button.ClickAsync(new LocatorClickOptions { Timeout = 2_000 });
+                }
+                catch (PlaywrightException)
+                {
+                    // Ignore and continue.
+                }
+            }
+        }
+    }
+
+    private static async Task<bool> ClickFirstVisibleAsync(ILocator locator, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        ILocator target;
+        var count = await locator.CountAsync();
+        if (count == 0)
+        {
+            return false;
+        }
+
+        if (count == 1)
+        {
+            target = locator.First;
+            if (!await target.IsVisibleAsync())
+            {
+                return false;
+            }
+        }
+        else
+        {
+            target = locator;
+            var foundVisible = false;
+            for (var i = 0; i < count; i++)
+            {
+                var item = locator.Nth(i);
+                if (!await item.IsVisibleAsync())
+                {
+                    continue;
+                }
+
+                target = item;
+                foundVisible = true;
+                break;
+            }
+
+            if (!foundVisible)
+            {
+                return false;
+            }
+        }
+
+        await target.ScrollIntoViewIfNeededAsync();
+        try
+        {
+            await target.ClickAsync(new LocatorClickOptions { Timeout = 8_000 });
+        }
+        catch (PlaywrightException)
+        {
+            await target.EvaluateAsync("node => node.click()");
+        }
+
+        return true;
     }
 
     private static async Task TypeSequentiallyAsync(
