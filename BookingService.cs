@@ -600,37 +600,235 @@ public sealed class BookingService
         CancellationToken cancellationToken)
     {
         account.UpdateStatus("Watching Availability");
-        Log(account.Username, "Info", $"Entering booking loop for {profile.TrainNumber} / {profile.TravelClass}.");
+        var trainNumber = NormalizeTrainNumber(profile.TrainNumber);
+        var travelClass = profile.TravelClass.Trim();
+        Log(account.Username, "Info", $"Entering booking loop for train {trainNumber}, class {travelClass}, date {FormatIrctcJourneyDate(profile.JourneyDate)}.");
+
+        if (string.IsNullOrWhiteSpace(trainNumber) || string.IsNullOrWhiteSpace(travelClass))
+        {
+            throw new InvalidOperationException("Train number and travel class must be set in the booking profile.");
+        }
+
+        await WaitForTrainListAsync(page, cancellationToken);
 
         for (var attempt = 1; attempt <= profile.MaxRefreshAttempts; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            account.UpdateLastAction($"Refresh attempt {attempt}/{profile.MaxRefreshAttempts}");
+            account.UpdateLastAction($"Availability check {attempt}/{profile.MaxRefreshAttempts}");
 
-            if (attempt > 1)
+            try
             {
-                await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.NetworkIdle });
+                var trainBlock = await GetTrainBlockByNumberAsync(page, trainNumber, cancellationToken);
+                Log(account.Username, "Info", $"Train {trainNumber} found. Selecting class {travelClass}.");
+                var classCell = await FindClassCellAsync(trainBlock, travelClass, cancellationToken);
+                await classCell.ScrollIntoViewIfNeededAsync();
+                await classCell.ClickAsync(new LocatorClickOptions { Force = true, Timeout = 5_000 });
+                await Task.Delay(600, cancellationToken);
+
+                Log(account.Username, "Info", $"Selecting date {FormatIrctcJourneyDate(profile.JourneyDate)}.");
+                var dateButton = await FindDateButtonAsync(trainBlock, profile.JourneyDate, cancellationToken);
+                await dateButton.ScrollIntoViewIfNeededAsync();
+                await dateButton.ClickAsync(new LocatorClickOptions { Force = true, Timeout = 5_000 });
+                await Task.Delay(600, cancellationToken);
+
+                if (await TryClickBookNowAsync(trainBlock, cancellationToken))
+                {
+                    account.UpdateStatus("Booking");
+                    account.UpdateLastAction("Book Now clicked.");
+                    Log(account.Username, "Success", "Book Now clicked, opening passenger page.");
+                    await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
+                    return;
+                }
+
+                Log(account.Username, "Info", $"Book Now not enabled yet (attempt {attempt}).");
+                if (attempt < profile.MaxRefreshAttempts)
+                {
+                    await RefreshClassAvailabilityAsync(classCell, cancellationToken);
+                }
+            }
+            catch (TimeoutException ex)
+            {
+                Log(account.Username, "Info", $"Attempt {attempt}: {ex.Message}");
+                if (attempt > 1)
+                {
+                    await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
+                    await WaitForTrainListAsync(page, cancellationToken);
+                }
             }
 
-            var trainRow = page.Locator($"tr:has-text('{profile.TrainNumber}')");
-            var targetClass = trainRow.Locator($"td:has-text('{profile.TravelClass}')");
-            var bookNowButton = targetClass.Locator("button:has-text('Book Now')");
-
-            if (await bookNowButton.CountAsync() > 0 && await bookNowButton.First.IsVisibleAsync())
-            {
-                account.UpdateStatus("Booking");
-                account.UpdateLastAction("Book Now available.");
-                Log(account.Username, "Success", "Book Now found, opening passenger page.");
-                await bookNowButton.First.ClickAsync();
-                await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
-                return;
-            }
-
-            Log(account.Username, "Info", $"Book Now not available (attempt {attempt}).");
             await Task.Delay(profile.RefreshIntervalMs, cancellationToken);
         }
 
-        throw new TimeoutException("Train/class did not become bookable before refresh limit.");
+        throw new TimeoutException($"Train {trainNumber} / class {travelClass} did not become bookable before refresh limit.");
+    }
+
+    private static string NormalizeTrainNumber(string trainNumber)
+    {
+        var trimmed = trainNumber.Trim();
+        var inBrackets = Regex.Match(trimmed, @"\((\d+)\)");
+        if (inBrackets.Success)
+        {
+            return inBrackets.Groups[1].Value;
+        }
+
+        var digits = Regex.Match(trimmed, @"\d{4,6}");
+        return digits.Success ? digits.Value : trimmed;
+    }
+
+    private static async Task WaitForTrainListAsync(IPage page, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        await page.Locator("div.train-heading strong").First.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 30_000
+        });
+    }
+
+    private static async Task<ILocator> GetTrainBlockByNumberAsync(IPage page, string trainNumber, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var trainHeading = page.Locator("div.train-heading strong").Filter(new LocatorFilterOptions
+        {
+            HasTextRegex = new Regex($@"\(\s*{Regex.Escape(trainNumber)}\s*\)", RegexOptions.IgnoreCase)
+        });
+
+        await trainHeading.First.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15_000
+        });
+
+        return trainHeading.First.Locator("xpath=ancestor::div[contains(@class,'dull-back')][1]");
+    }
+
+    private static async Task<ILocator> FindClassCellAsync(ILocator trainBlock, string travelClass, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var classCells = trainBlock.Locator("table td");
+        var bracketPattern = new Regex($@"\(\s*{Regex.Escape(travelClass)}\s*\)", RegexOptions.IgnoreCase);
+        var count = await classCells.CountAsync();
+
+        for (var i = 0; i < count; i++)
+        {
+            var cell = classCells.Nth(i);
+            if (!await cell.IsVisibleAsync())
+            {
+                continue;
+            }
+
+            var text = (await cell.InnerTextAsync()).Trim();
+            if (bracketPattern.IsMatch(text) ||
+                text.Contains($"({travelClass})", StringComparison.OrdinalIgnoreCase) ||
+                text.EndsWith(travelClass, StringComparison.OrdinalIgnoreCase))
+            {
+                return cell;
+            }
+        }
+
+        throw new TimeoutException($"Could not find class cell for '{travelClass}' on this train.");
+    }
+
+    private static IEnumerable<string> BuildDateLabelCandidates(DateTime journeyDate)
+    {
+        yield return FormatIrctcJourneyDate(journeyDate);
+        yield return $"{journeyDate.Day} {journeyDate:MMM}";
+        yield return $"{journeyDate.Day:00} {journeyDate:MMM}";
+        yield return journeyDate.ToString("ddd, d MMM", CultureInfo.InvariantCulture);
+        yield return journeyDate.ToString("dddd, d MMMM yyyy", CultureInfo.InvariantCulture);
+        yield return journeyDate.ToString("dd-MMM-yyyy", CultureInfo.InvariantCulture);
+    }
+
+    private static async Task<ILocator> FindDateButtonAsync(
+        ILocator trainBlock,
+        DateTime journeyDate,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        foreach (var label in BuildDateLabelCandidates(journeyDate))
+        {
+            var candidate = trainBlock.Locator("button, span.a, a, div, td, li").Filter(new LocatorFilterOptions
+            {
+                HasTextRegex = new Regex(Regex.Escape(label), RegexOptions.IgnoreCase)
+            });
+
+            var count = await candidate.CountAsync();
+            for (var i = 0; i < count; i++)
+            {
+                var item = candidate.Nth(i);
+                if (await item.IsVisibleAsync())
+                {
+                    return item;
+                }
+            }
+        }
+
+        var dayMonthPattern = new Regex(
+            $@"\b{journeyDate.Day}\b.*\b{journeyDate:MMM}\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        var flexible = trainBlock.Locator("button, span.a, a, div, td, li").Filter(new LocatorFilterOptions
+        {
+            HasTextRegex = dayMonthPattern
+        });
+
+        if (await flexible.CountAsync() > 0)
+        {
+            return flexible.First;
+        }
+
+        throw new TimeoutException($"Could not find date button for {FormatIrctcJourneyDate(journeyDate)}.");
+    }
+
+    private static async Task<bool> TryClickBookNowAsync(ILocator trainBlock, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var bookNow = trainBlock.Locator("button").Filter(new LocatorFilterOptions
+        {
+            HasTextRegex = new Regex("Book\\s*Now", RegexOptions.IgnoreCase)
+        });
+
+        if (await bookNow.CountAsync() == 0)
+        {
+            return false;
+        }
+
+        var button = bookNow.First;
+        if (!await button.IsVisibleAsync() || await button.IsDisabledAsync())
+        {
+            return false;
+        }
+
+        await button.ScrollIntoViewIfNeededAsync();
+        try
+        {
+            await button.ClickAsync(new LocatorClickOptions { Timeout = 5_000, Force = true });
+        }
+        catch (Exception)
+        {
+            await button.EvaluateAsync("node => node.click()");
+        }
+
+        return true;
+    }
+
+    private static async Task RefreshClassAvailabilityAsync(ILocator classCell, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var refreshLink = classCell.Locator("text=/Refresh/i, .fa-refresh, [class*='refresh'], span:has-text('Refresh')");
+        if (await refreshLink.CountAsync() > 0 && await refreshLink.First.IsVisibleAsync())
+        {
+            await refreshLink.First.ClickAsync(new LocatorClickOptions { Force = true, Timeout = 3_000 });
+            await Task.Delay(800, cancellationToken);
+            return;
+        }
+
+        await classCell.ClickAsync(new LocatorClickOptions { Force = true, Timeout = 3_000 });
+        await Task.Delay(500, cancellationToken);
     }
 
     private async Task FillPassengersAsync(
