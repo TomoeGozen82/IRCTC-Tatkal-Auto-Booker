@@ -327,50 +327,125 @@ public sealed class BookingService
         await DismissAdOverlaysAsync(page, cancellationToken);
         await WaitForTrainSearchFormAsync(page, cancellationToken);
 
-        Log(account.Username, "Info", $"Typing From station: {profile.FromStation}");
-        await FillStationAutocompleteAsync(
+        await RunSearchStepAsync(
+            account,
+            $"Search step 1/7: typing From station {profile.FromStation}",
+            "FillFromStation",
+            () => FillStationAutocompleteAsync(
             page,
             formControlName: "origin",
             ariaLabel: "Enter From station. Input is Mandatory.",
             station: profile.FromStation,
+            cancellationToken),
             cancellationToken);
 
-        Log(account.Username, "Info", $"Typing To station: {profile.ToStation}");
-        await FillStationAutocompleteAsync(
+        await RunSearchStepAsync(
+            account,
+            $"Search step 2/7: typing To station {profile.ToStation}",
+            "FillToStation",
+            () => FillStationAutocompleteAsync(
             page,
             formControlName: "destination",
             ariaLabel: "Enter To station. Input is Mandatory.",
             station: profile.ToStation,
+            cancellationToken),
             cancellationToken);
 
-        Log(account.Username, "Info", $"Setting journey date: {FormatIrctcJourneyDate(profile.JourneyDate)}");
-        await FillJourneyDateAsync(page, profile.JourneyDate, cancellationToken);
+        await RunSearchStepAsync(
+            account,
+            $"Search step 3/7: setting journey date {FormatIrctcJourneyDate(profile.JourneyDate)}",
+            "FillJourneyDate",
+            () => FillJourneyDateAsync(page, profile.JourneyDate, cancellationToken),
+            cancellationToken);
+
+        await RunSearchStepAsync(
+            account,
+            "Search step 4/7: closing date picker overlay",
+            "CloseDatePicker",
+            async () =>
+            {
+                await page.Keyboard.PressAsync("Escape");
+                await Task.Delay(400, cancellationToken);
+            },
+            cancellationToken);
 
         if (!string.IsNullOrWhiteSpace(profile.TravelClass) &&
             !profile.TravelClass.Equals("All Classes", StringComparison.OrdinalIgnoreCase))
         {
-            await SelectPrimeNgDropdownAsync(
-                page,
-                formControlName: "journeyClass",
-                shortCode: profile.TravelClass.Trim(),
+            var travelClass = profile.TravelClass.Trim();
+            await RunSearchStepAsync(
+                account,
+                $"Search step 5/7: selecting travel class {travelClass}",
+                "SelectJourneyClass",
+                () => SelectPrimeNgDropdownAsync(page, "journeyClass", travelClass, cancellationToken),
                 cancellationToken);
+        }
+        else
+        {
+            Log(account.Username, "Info", "Search step 5/7: skipping class (All Classes).");
         }
 
         if (!string.IsNullOrWhiteSpace(profile.Quota))
         {
-            await SelectPrimeNgDropdownAsync(
-                page,
-                formControlName: "journeyQuota",
-                shortCode: profile.Quota.Trim(),
+            var quota = profile.Quota.Trim();
+            await RunSearchStepAsync(
+                account,
+                $"Search step 5b/7: selecting quota {quota}",
+                "SelectJourneyQuota",
+                () => SelectPrimeNgDropdownAsync(page, "journeyQuota", quota, cancellationToken),
                 cancellationToken);
         }
 
-        await ClickSearchTrainsButtonAsync(page, cancellationToken);
+        await RunSearchStepAsync(
+            account,
+            "Search step 7/7: clicking Search Trains",
+            "ClickSearchTrains",
+            () => ClickSearchTrainsButtonAsync(page, cancellationToken),
+            cancellationToken);
 
-        await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
+        Log(account.Username, "Info", "Waiting for train results list (div.trains-div)...");
+        await WaitForTrainListAsync(page, cancellationToken);
+
         account.UpdateLastAction("Train search submitted.");
-        Log(account.Username, "Info", "Train search submitted.");
+        Log(account.Username, "Info", "Train results loaded. Entering availability loop.");
     }
+
+    private async Task RunSearchStepAsync(
+        AccountModel account,
+        string stepLog,
+        string stepId,
+        Func<Task> action,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Log(account.Username, "Info", stepLog);
+
+        try
+        {
+            await action();
+        }
+        catch (BookingAutomationException)
+        {
+            throw;
+        }
+        catch (TimeoutException)
+        {
+            throw new BookingAutomationException(
+                stepId,
+                $"{stepLog} — timed out after 20s. The control may be hidden behind a popup or the value may be invalid.");
+        }
+        catch (InvalidOperationException ex)
+        {
+            throw new BookingAutomationException(stepId, ex.Message);
+        }
+        catch (PlaywrightException ex) when (IsPlaywrightTimeout(ex))
+        {
+            throw new BookingAutomationException(stepId, $"{stepLog} — {ex.Message}");
+        }
+    }
+
+    private static bool IsPlaywrightTimeout(PlaywrightException ex) =>
+        ex.Message.Contains("Timeout", StringComparison.OrdinalIgnoreCase);
 
     private static async Task WaitForTrainSearchFormAsync(IPage page, CancellationToken cancellationToken)
     {
@@ -529,17 +604,83 @@ public sealed class BookingService
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        var dropdown = page.Locator($"p-dropdown[formcontrolname='{formControlName}']");
-        await dropdown.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
-        await dropdown.Locator(".ui-dropdown-trigger").ClickAsync(new LocatorClickOptions { Force = true });
+        var dropdown = page.Locator(
+            $"p-dropdown[formcontrolname='{formControlName}'], " +
+            $"p-dropdown[formcontrolname='{formControlName.ToLowerInvariant()}']");
+        await dropdown.First.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15_000
+        });
+        await dropdown.First.ScrollIntoViewIfNeededAsync();
 
-        var panel = page.Locator(".ui-dropdown-panel:visible").Last;
-        await panel.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 8_000 });
+        var trigger = dropdown.First.Locator(".ui-dropdown-trigger, .p-dropdown-trigger, [role='button']").First;
+        await trigger.ClickAsync(new LocatorClickOptions { Force = true, Timeout = 5_000 });
 
-        var option = await FindDropdownOptionAsync(panel, shortCode);
+        ILocator? panel = null;
+        var panelSelectors = new[]
+        {
+            ".ui-dropdown-panel:visible",
+            ".p-dropdown-panel:visible",
+            "div[role='listbox']:visible"
+        };
+
+        foreach (var selector in panelSelectors)
+        {
+            var candidate = page.Locator(selector).Last;
+            try
+            {
+                await candidate.WaitForAsync(new LocatorWaitForOptions
+                {
+                    State = WaitForSelectorState.Visible,
+                    Timeout = 5_000
+                });
+                panel = candidate;
+                break;
+            }
+            catch (TimeoutException)
+            {
+                // Try next panel selector.
+            }
+        }
+
+        if (panel is null)
+        {
+            throw new InvalidOperationException(
+                $"Dropdown '{formControlName}' opened but no options panel appeared. " +
+                "A calendar or overlay may be blocking the form.");
+        }
+
+        ILocator option;
+        try
+        {
+            option = await FindDropdownOptionAsync(panel, shortCode);
+        }
+        catch (InvalidOperationException)
+        {
+            var labels = await CollectDropdownOptionLabelsAsync(panel);
+            throw new InvalidOperationException(
+                $"Could not find '{shortCode}' in {formControlName} dropdown. " +
+                $"Options visible: {(labels.Count > 0 ? string.Join(", ", labels) : "none")}.");
+        }
+
         await option.ScrollIntoViewIfNeededAsync();
-        await option.ClickAsync(new LocatorClickOptions { Force = true });
+        await option.ClickAsync(new LocatorClickOptions { Force = true, Timeout = 5_000 });
+        await page.Keyboard.PressAsync("Escape");
         await Task.Delay(200, cancellationToken);
+    }
+
+    private static async Task<IReadOnlyList<string>> CollectDropdownOptionLabelsAsync(ILocator panel)
+    {
+        var items = panel.Locator("li[role='option'], li.ui-dropdown-item, li.p-dropdown-item");
+        var count = await items.CountAsync();
+        var labels = new List<string>(count);
+        for (var i = 0; i < count; i++)
+        {
+            labels.Add((await items.Nth(i).InnerTextAsync()).Trim());
+        }
+
+        return labels;
     }
 
     private static async Task<ILocator> FindDropdownOptionAsync(ILocator panel, string shortCode)
