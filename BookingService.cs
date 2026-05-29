@@ -618,10 +618,12 @@ public sealed class BookingService
 
             try
             {
-                Log(account.Username, "Info", $"Step 1: Locating train ({trainNumber}) in results list.");
-                var trainBlock = await GetTrainBlockByNumberAsync(page, trainNumber, cancellationToken);
-                var trainTitle = (await trainBlock.Locator("div.train-heading strong").First.InnerTextAsync()).Trim();
-                Log(account.Username, "Info", $"Step 2: Found train block — {trainTitle}.");
+                Log(account.Username, "Info",
+                    $"Step 1: Scanning train cards (div.bull-back.border-all) for number ({trainNumber}).");
+                var (trainBlock, trainTitle, cardIndex, cardsScanned) =
+                    await GetTrainBlockByNumberAsync(page, trainNumber, cancellationToken);
+                Log(account.Username, "Info",
+                    $"Step 2: Found train card #{cardIndex + 1} of {cardsScanned} — {trainTitle}.");
 
                 Log(account.Username, "Info", $"Step 3: Selecting class {travelClass}.");
                 await SelectClassOnTrainAsync(trainBlock, travelClass, cancellationToken);
@@ -678,33 +680,66 @@ public sealed class BookingService
         return digits.Success ? digits.Value : trimmed;
     }
 
+    private const string TrainListContainerSelector = "div.trains-div";
+    private const string TrainCardSelector = "div.trains-div div.bull-back.border-all";
+
     private static async Task WaitForTrainListAsync(IPage page, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        await page.Locator("div.trains-div app-train-avl-enq, app-train-avl-enq").First.WaitForAsync(new LocatorWaitForOptions
+        await page.Locator(TrainListContainerSelector).WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 30_000
+        });
+        await page.Locator(TrainCardSelector).First.WaitForAsync(new LocatorWaitForOptions
         {
             State = WaitForSelectorState.Visible,
             Timeout = 30_000
         });
     }
 
-    private static async Task<ILocator> GetTrainBlockByNumberAsync(IPage page, string trainNumber, CancellationToken cancellationToken)
+    private static async Task<(ILocator Block, string Title, int CardIndex, int CardsScanned)> GetTrainBlockByNumberAsync(
+        IPage page,
+        string trainNumber,
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        var trainHeading = page.Locator("div.train-heading strong").Filter(new LocatorFilterOptions
-        {
-            HasTextRegex = new Regex($@"\(\s*{Regex.Escape(trainNumber)}\s*\)", RegexOptions.IgnoreCase)
-        });
+        var numberPattern = new Regex($@"\(\s*{Regex.Escape(trainNumber)}\s*\)", RegexOptions.IgnoreCase);
+        var trainCards = page.Locator(TrainCardSelector);
 
-        await trainHeading.First.WaitForAsync(new LocatorWaitForOptions
+        await trainCards.First.WaitForAsync(new LocatorWaitForOptions
         {
             State = WaitForSelectorState.Visible,
             Timeout = 15_000
         });
 
-        // Full train card is app-train-avl-enq (header + class tabs + date table + Book Now).
-        return trainHeading.First.Locator("xpath=ancestor::app-train-avl-enq[1]");
+        var count = await trainCards.CountAsync();
+        for (var i = 0; i < count; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var card = trainCards.Nth(i);
+
+            var heading = card.Locator("div.dull-back div.train-heading strong, div.train-heading strong");
+            if (await heading.CountAsync() == 0)
+            {
+                continue;
+            }
+
+            var title = (await heading.First.InnerTextAsync()).Trim();
+            if (!numberPattern.IsMatch(title))
+            {
+                continue;
+            }
+
+            // All actions live inside app-train-avl-enq within this card.
+            var trainEnq = card.Locator("app-train-avl-enq");
+            var block = await trainEnq.CountAsync() > 0 ? trainEnq.First : card;
+            return (block, title, i, count);
+        }
+
+        throw new TimeoutException(
+            $"Train ({trainNumber}) not found. Scanned {count} train card(s) matching '{TrainCardSelector}'.");
     }
 
     private static Regex ClassCodePattern(string travelClass) =>
@@ -732,8 +767,8 @@ public sealed class BookingService
             return;
         }
 
-        // Path B: class box in white-back table (click "AC 3 Tier (3A)" / Refresh to load availability).
-        var classBox = trainBlock.Locator("div.white-back div.pre-avl, div.pre-avl").Filter(new LocatorFilterOptions
+        // Path B: class box in white-back table only (not date cells in td.link).
+        var classBox = trainBlock.Locator("div.white-back table td div.pre-avl").Filter(new LocatorFilterOptions
         {
             HasTextRegex = classPattern
         });
@@ -743,7 +778,15 @@ public sealed class BookingService
             var box = classBox.First;
             await box.ScrollIntoViewIfNeededAsync();
             await box.ClickAsync(new LocatorClickOptions { Force = true, Timeout = 5_000 });
-            await Task.Delay(600, cancellationToken);
+            await Task.Delay(400, cancellationToken);
+
+            var refreshInBox = box.Locator("text=/^\\s*Refresh\\s*$/i");
+            if (await refreshInBox.CountAsync() > 0 && await refreshInBox.First.IsVisibleAsync())
+            {
+                await refreshInBox.First.ClickAsync(new LocatorClickOptions { Force = true, Timeout = 3_000 });
+                await Task.Delay(800, cancellationToken);
+            }
+
             return;
         }
 
@@ -767,12 +810,21 @@ public sealed class BookingService
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        var dateCells = trainBlock.Locator("table td.link div.pre-avl, td.link .pre-avl");
-        await dateCells.First.WaitForAsync(new LocatorWaitForOptions
+        // Date row appears only after class is loaded (dull-back section, td.link cells).
+        var dateCells = trainBlock.Locator("div.dull-back table td.link div.pre-avl");
+        try
         {
-            State = WaitForSelectorState.Visible,
-            Timeout = 12_000
-        });
+            await dateCells.First.WaitForAsync(new LocatorWaitForOptions
+            {
+                State = WaitForSelectorState.Visible,
+                Timeout = 12_000
+            });
+        }
+        catch (TimeoutException)
+        {
+            throw new TimeoutException(
+                "Date availability row not visible yet — class may need a Refresh click first.");
+        }
 
         var labels = BuildDateLabelCandidates(journeyDate).ToList();
         var count = await dateCells.CountAsync();
