@@ -126,13 +126,19 @@ public sealed class BookingService
             Timeout = 15_000
         });
 
-        var usernameField = loginForm.Locator("input[formcontrolname='userId']");
-        var passwordField = loginForm.Locator("input[formcontrolname='password']");
-
-        await usernameField.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
-        await passwordField.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
+        var usernameField = await ResolveLoginFieldAsync(
+            loginForm,
+            placeholder: "User Name",
+            formControlName: "userId",
+            cancellationToken);
+        var passwordField = await ResolveLoginFieldAsync(
+            loginForm,
+            placeholder: "Password",
+            formControlName: "password",
+            cancellationToken);
 
         await TypeIntoLoginFieldAsync(page, usernameField, username, cancellationToken);
+        await Task.Delay(150, cancellationToken);
         await TypeIntoLoginFieldAsync(page, passwordField, password, cancellationToken);
 
         var signInButton = loginForm
@@ -157,24 +163,52 @@ public sealed class BookingService
         }
     }
 
+    private static async Task<ILocator> ResolveLoginFieldAsync(
+        ILocator loginForm,
+        string placeholder,
+        string formControlName,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var byPlaceholder = loginForm.GetByPlaceholder(placeholder);
+        if (await byPlaceholder.CountAsync() > 0)
+        {
+            await byPlaceholder.First.WaitForAsync(new LocatorWaitForOptions
+            {
+                State = WaitForSelectorState.Visible,
+                Timeout = 10_000
+            });
+            return byPlaceholder.First;
+        }
+
+        var byFormControl = loginForm.Locator($"input[formcontrolname='{formControlName}']");
+        await byFormControl.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 10_000
+        });
+        return byFormControl.First;
+    }
+
     private static async Task TypeIntoLoginFieldAsync(
         IPage page,
         ILocator field,
         string text,
         CancellationToken cancellationToken,
-        int delayMs = 80)
+        int delayMs = 100)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
+        await field.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
         await field.ScrollIntoViewIfNeededAsync();
         await field.ClickAsync(new LocatorClickOptions { Force = true, Timeout = 5_000 });
 
-        // Clear any existing value so sequential typing starts from an empty field.
-        await field.FillAsync(string.Empty);
+        // Clear the field, then type one character at a time like a human.
         await page.Keyboard.PressAsync("Control+A");
         await page.Keyboard.PressAsync("Backspace");
-
         await field.PressSequentiallyAsync(text, new LocatorPressSequentiallyOptions { Delay = delayMs });
+
         await field.DispatchEventAsync("input");
         await field.DispatchEventAsync("change");
         await field.BlurAsync();
@@ -355,7 +389,12 @@ public sealed class BookingService
         await page.WaitForLoadStateAsync(LoadState.Load);
         await TryDismissBlockingOverlaysAsync(page);
 
-        var loginModalInput = page.Locator("form[formcontrolname='loginForm'] input[formcontrolname='userId']");
+        var loginForm = page.Locator("form[formcontrolname='loginForm']");
+        var loginModalInput = loginForm.GetByPlaceholder("User Name");
+        if (await loginModalInput.CountAsync() == 0)
+        {
+            loginModalInput = loginForm.Locator("input[formcontrolname='userId']");
+        }
         if (await loginModalInput.IsVisibleAsync())
         {
             return;
