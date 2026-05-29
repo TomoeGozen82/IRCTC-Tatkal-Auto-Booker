@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -10,6 +11,7 @@ public sealed class BookingService
     private static readonly HttpClient HttpClient = new();
     private const int DesktopViewportWidth = 1920;
     private const int DesktopViewportHeight = 1080;
+    private const string IrctcJourneyDateFormat = "dd/MM/yyyy";
 
     public event Action<ServiceLog>? LogEmitted;
 
@@ -300,7 +302,7 @@ public sealed class BookingService
     {
         account.UpdateStatus("Searching");
         account.UpdateLastAction("Filling search criteria.");
-        Log(account.Username, "Info", $"Searching trains: {profile.FromStation} -> {profile.ToStation}, {profile.JourneyDate:dd/MM/yyyy}, {profile.TravelClass}, {profile.Quota}.");
+        Log(account.Username, "Info", $"Searching trains: {profile.FromStation} -> {profile.ToStation}, {FormatIrctcJourneyDate(profile.JourneyDate)}, {profile.TravelClass}, {profile.Quota}.");
         cancellationToken.ThrowIfCancellationRequested();
 
         if (string.IsNullOrWhiteSpace(profile.FromStation) || string.IsNullOrWhiteSpace(profile.ToStation))
@@ -327,6 +329,7 @@ public sealed class BookingService
             station: profile.ToStation,
             cancellationToken);
 
+        Log(account.Username, "Info", $"Setting journey date: {FormatIrctcJourneyDate(profile.JourneyDate)}");
         await FillJourneyDateAsync(page, profile.JourneyDate, cancellationToken);
 
         if (!string.IsNullOrWhiteSpace(profile.TravelClass) &&
@@ -466,23 +469,41 @@ public sealed class BookingService
         await Task.Delay(300, cancellationToken);
     }
 
+    private static string FormatIrctcJourneyDate(DateTime journeyDate) =>
+        journeyDate.ToString(IrctcJourneyDateFormat, CultureInfo.InvariantCulture);
+
     private static async Task FillJourneyDateAsync(IPage page, DateTime journeyDate, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        var dateInput = page.Locator("p-calendar[formcontrolname='journeyDate'] input.ui-inputtext").First;
+        var dateInput = page.Locator("p-calendar[formcontrolname='journeyDate'] input.ui-inputtext, #jDate input.ui-inputtext").First;
         await dateInput.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
+        await dateInput.ScrollIntoViewIfNeededAsync();
         await dateInput.ClickAsync(new LocatorClickOptions { Force = true });
-        await dateInput.FocusAsync();
 
-        var formatted = journeyDate.ToString("dd/MM/yyyy");
-        await page.Keyboard.PressAsync("Control+A");
-        await page.Keyboard.PressAsync("Backspace");
-        await page.Keyboard.TypeAsync(formatted, new KeyboardTypeOptions { Delay = 80 });
-        await page.Keyboard.PressAsync("Tab");
+        // IRCTC expects slashes: 06/12/2026 (not 06-12-2026).
+        var formatted = FormatIrctcJourneyDate(journeyDate);
+
+        await dateInput.FillAsync(string.Empty);
+        await dateInput.PressSequentiallyAsync(formatted, new LocatorPressSequentiallyOptions { Delay = 80 });
+
+        var currentValue = await dateInput.InputValueAsync();
+        if (currentValue.Contains('-', StringComparison.Ordinal) || !currentValue.Contains('/', StringComparison.Ordinal))
+        {
+            await dateInput.EvaluateAsync(
+                """
+                (el, value) => {
+                    el.value = value;
+                    el.dispatchEvent(new Event('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                """,
+                formatted);
+        }
 
         await dateInput.DispatchEventAsync("input");
         await dateInput.DispatchEventAsync("change");
+        await dateInput.PressAsync("Tab");
         await Task.Delay(200, cancellationToken);
     }
 
