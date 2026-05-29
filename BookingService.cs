@@ -139,27 +139,60 @@ public sealed class BookingService
         await TypeIntoLoginFieldAsync(page, usernameField, username, cancellationToken);
         await Task.Delay(150, cancellationToken);
         await TypeIntoLoginFieldAsync(page, passwordField, password, cancellationToken);
+        await Task.Delay(200, cancellationToken);
 
-        var signInButton = loginForm
-            .Locator("button[type='submit'].search_btn.train_Search")
-            .Filter(new LocatorFilterOptions { HasText = "SIGN IN" });
+        await ClickSignInButtonAsync(page, cancellationToken);
+    }
 
-        if (await signInButton.CountAsync() == 0)
+    private static async Task ClickSignInButtonAsync(IPage page, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        // Match IRCTC login modal submit button from DOM:
+        // <button type="submit" class="search_btn train_Search train_Search_custom_hover">SIGN IN</button>
+        var signInCandidates = new ILocator[]
         {
-            signInButton = loginForm.GetByRole(AriaRole.Button, new() { Name = "SIGN IN", Exact = true });
+            page.Locator(".ui-dialog-visible form[formcontrolname='loginForm'] button[type='submit'].search_btn.train_Search"),
+            page.Locator("form[formcontrolname='loginForm'] button[type='submit'].search_btn.train_Search"),
+            page.Locator(".ui-dialog-visible button.search_btn.train_Search.train_Search_custom_hover[type='submit']"),
+            page.Locator("form[formcontrolname='loginForm'] button[type='submit']:has-text('SIGN IN')"),
+            page.Locator("button.search_btn.train_Search[type='submit']")
+        };
+
+        foreach (var candidate in signInCandidates)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var count = await candidate.CountAsync();
+            for (var i = 0; i < count; i++)
+            {
+                var button = candidate.Nth(i);
+                if (!await button.IsVisibleAsync())
+                {
+                    continue;
+                }
+
+                var text = (await button.InnerTextAsync()).Trim();
+                if (!text.Contains("SIGN IN", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                await button.ScrollIntoViewIfNeededAsync();
+
+                try
+                {
+                    await button.ClickAsync(new LocatorClickOptions { Timeout = 3_000, Force = true });
+                    return;
+                }
+                catch (Exception)
+                {
+                    await button.EvaluateAsync("node => node.click()");
+                    return;
+                }
+            }
         }
 
-        await signInButton.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
-        await signInButton.ScrollIntoViewIfNeededAsync();
-
-        try
-        {
-            await signInButton.ClickAsync(new LocatorClickOptions { Timeout = 8_000 });
-        }
-        catch (PlaywrightException)
-        {
-            await signInButton.EvaluateAsync("node => node.click()");
-        }
+        throw new TimeoutException("Could not click the SIGN IN button in the login modal.");
     }
 
     private static async Task<ILocator> ResolveLoginFieldAsync(
