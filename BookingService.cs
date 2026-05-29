@@ -1,5 +1,6 @@
 using System.Net.Http;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Playwright;
 
 namespace Booking;
@@ -297,19 +298,200 @@ public sealed class BookingService
     {
         account.UpdateStatus("Searching");
         account.UpdateLastAction("Filling search criteria.");
-        Log(account.Username, "Info", "Setting source, destination, date and Tatkal quota.");
+        Log(account.Username, "Info", $"Searching trains: {profile.FromStation} -> {profile.ToStation}, {profile.JourneyDate:dd/MM/yyyy}, {profile.TravelClass}, {profile.Quota}.");
         cancellationToken.ThrowIfCancellationRequested();
 
-        await page.FillAsync("input[aria-controls='pr_id_1_list']", profile.FromStation);
-        await page.FillAsync("input[aria-controls='pr_id_2_list']", profile.ToStation);
-        await page.FillAsync("input[placeholder='Journey Date(dd-mm-yyyy)*']", profile.JourneyDate.ToString("dd-MM-yyyy"));
-        await page.ClickAsync("p-dropdown[formcontrolname='journeyQuota'] .p-dropdown-trigger");
-        await page.ClickAsync("li[aria-label='TATKAL']");
+        await WaitForTrainSearchFormAsync(page, cancellationToken);
 
-        await ClickWithFallbackAsync(page, "button:has-text('Search')", cancellationToken);
+        await FillStationAutocompleteAsync(
+            page,
+            ariaLabel: "Enter From station. Input is Mandatory.",
+            station: profile.FromStation,
+            cancellationToken);
+        await FillStationAutocompleteAsync(
+            page,
+            ariaLabel: "Enter To station. Input is Mandatory.",
+            station: profile.ToStation,
+            cancellationToken);
+
+        await FillJourneyDateAsync(page, profile.JourneyDate, cancellationToken);
+
+        if (!string.IsNullOrWhiteSpace(profile.TravelClass) &&
+            !profile.TravelClass.Equals("All Classes", StringComparison.OrdinalIgnoreCase))
+        {
+            await SelectPrimeNgDropdownAsync(
+                page,
+                formControlName: "journeyClass",
+                shortCode: profile.TravelClass.Trim(),
+                cancellationToken);
+        }
+
+        if (!string.IsNullOrWhiteSpace(profile.Quota))
+        {
+            await SelectPrimeNgDropdownAsync(
+                page,
+                formControlName: "journeyQuota",
+                shortCode: profile.Quota.Trim(),
+                cancellationToken);
+        }
+
+        await ClickSearchTrainsButtonAsync(page, cancellationToken);
+
         await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
         account.UpdateLastAction("Train search submitted.");
         Log(account.Username, "Info", "Train search submitted.");
+    }
+
+    private static async Task WaitForTrainSearchFormAsync(IPage page, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        await page.GetByLabel("Enter From station. Input is Mandatory.", new PageGetByLabelOptions { Exact = true })
+            .WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 20_000 });
+    }
+
+    private static async Task FillStationAutocompleteAsync(
+        IPage page,
+        string ariaLabel,
+        string station,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (string.IsNullOrWhiteSpace(station))
+        {
+            throw new InvalidOperationException($"Station value is required for '{ariaLabel}'.");
+        }
+
+        var input = page.GetByLabel(ariaLabel, new PageGetByLabelOptions { Exact = true });
+        await input.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
+        await input.ClickAsync(new LocatorClickOptions { Force = true });
+        await input.FocusAsync();
+
+        await page.Keyboard.PressAsync("Control+A");
+        await page.Keyboard.PressAsync("Backspace");
+        await page.Keyboard.TypeAsync(station.Trim(), new KeyboardTypeOptions { Delay = 90 });
+
+        await Task.Delay(500, cancellationToken);
+
+        var listId = await input.GetAttributeAsync("aria-controls");
+        ILocator firstOption;
+        if (!string.IsNullOrWhiteSpace(listId))
+        {
+            firstOption = page.Locator($"#{listId} li").First;
+        }
+        else
+        {
+            firstOption = page.Locator(".ui-autocomplete-panel li, ul.ui-autocomplete-items li").First;
+        }
+
+        await firstOption.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 8_000 });
+        await firstOption.ClickAsync(new LocatorClickOptions { Force = true });
+        await Task.Delay(200, cancellationToken);
+    }
+
+    private static async Task FillJourneyDateAsync(IPage page, DateTime journeyDate, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var dateInput = page.Locator("p-calendar[formcontrolname='journeyDate'] input.ui-inputtext").First;
+        await dateInput.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
+        await dateInput.ClickAsync(new LocatorClickOptions { Force = true });
+        await dateInput.FocusAsync();
+
+        var formatted = journeyDate.ToString("dd/MM/yyyy");
+        await page.Keyboard.PressAsync("Control+A");
+        await page.Keyboard.PressAsync("Backspace");
+        await page.Keyboard.TypeAsync(formatted, new KeyboardTypeOptions { Delay = 80 });
+        await page.Keyboard.PressAsync("Tab");
+
+        await dateInput.DispatchEventAsync("input");
+        await dateInput.DispatchEventAsync("change");
+        await Task.Delay(200, cancellationToken);
+    }
+
+    private static async Task SelectPrimeNgDropdownAsync(
+        IPage page,
+        string formControlName,
+        string shortCode,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var dropdown = page.Locator($"p-dropdown[formcontrolname='{formControlName}']");
+        await dropdown.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
+        await dropdown.Locator(".ui-dropdown-trigger").ClickAsync(new LocatorClickOptions { Force = true });
+
+        var panel = page.Locator(".ui-dropdown-panel:visible").Last;
+        await panel.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 8_000 });
+
+        var option = await FindDropdownOptionAsync(panel, shortCode);
+        await option.ScrollIntoViewIfNeededAsync();
+        await option.ClickAsync(new LocatorClickOptions { Force = true });
+        await Task.Delay(200, cancellationToken);
+    }
+
+    private static async Task<ILocator> FindDropdownOptionAsync(ILocator panel, string shortCode)
+    {
+        var normalized = shortCode.Trim();
+
+        // Exact aria-label (works for quota like TATKAL, GENERAL).
+        var byAriaLabel = panel.Locator($"li[role='option'][aria-label='{normalized}'], li[aria-label='{normalized}']");
+        if (await byAriaLabel.CountAsync() > 0)
+        {
+            return byAriaLabel.First;
+        }
+
+        var byAriaLabelIgnoreCase = panel.Locator("li[role='option'], li.ui-dropdown-item")
+            .Filter(new LocatorFilterOptions { HasTextString = normalized });
+        if (await byAriaLabelIgnoreCase.CountAsync() > 0)
+        {
+            return byAriaLabelIgnoreCase.First;
+        }
+
+        // Class codes appear as "(3A)", "(2S)" inside full names.
+        var bracketPattern = new Regex($@"\(\s*{Regex.Escape(normalized)}\s*\)", RegexOptions.IgnoreCase);
+        var allOptions = panel.Locator("li[role='option'], li.ui-dropdown-item");
+        var count = await allOptions.CountAsync();
+        for (var i = 0; i < count; i++)
+        {
+            var item = allOptions.Nth(i);
+            var text = (await item.InnerTextAsync()).Trim();
+            if (bracketPattern.IsMatch(text) ||
+                text.Equals(normalized, StringComparison.OrdinalIgnoreCase) ||
+                text.StartsWith(normalized, StringComparison.OrdinalIgnoreCase))
+            {
+                return item;
+            }
+        }
+
+        // Fallback: contains short code anywhere in label text.
+        var contains = panel.Locator("li[role='option'], li.ui-dropdown-item")
+            .Filter(new LocatorFilterOptions { HasTextRegex = new Regex(Regex.Escape(normalized), RegexOptions.IgnoreCase) });
+        if (await contains.CountAsync() > 0)
+        {
+            return contains.First;
+        }
+
+        throw new InvalidOperationException($"Could not find dropdown option matching '{shortCode}'.");
+    }
+
+    private static async Task ClickSearchTrainsButtonAsync(IPage page, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var searchButton = page.Locator("button.search_btn.train_Search")
+            .Filter(new LocatorFilterOptions { HasTextRegex = new Regex("Search\\s*Trains", RegexOptions.IgnoreCase) });
+
+        await searchButton.First.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
+        await searchButton.First.ScrollIntoViewIfNeededAsync();
+
+        try
+        {
+            await searchButton.First.ClickAsync(new LocatorClickOptions { Timeout = 5_000, Force = true });
+        }
+        catch (Exception)
+        {
+            await searchButton.First.EvaluateAsync("node => node.click()");
+        }
     }
 
     private async Task EnterBookingLoopAsync(
