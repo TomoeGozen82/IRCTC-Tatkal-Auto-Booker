@@ -798,7 +798,12 @@ public sealed class BookingService
                 {
                     account.UpdateStatus("Booking");
                     account.UpdateLastAction("Book Now clicked.");
-                    Log(account.Username, "Success", "Book Now clicked — opening passenger page.");
+                    Log(account.Username, "Success", "Book Now clicked.");
+
+                    Log(account.Username, "Info", "Step 6b: Checking for station mismatch confirmation dialog.");
+                    await AcceptIrctcConfirmationIfPresentAsync(page, account, cancellationToken);
+
+                    Log(account.Username, "Info", "Opening passenger page.");
                     await page.WaitForLoadStateAsync(LoadState.DOMContentLoaded);
                     return;
                 }
@@ -1190,6 +1195,66 @@ public sealed class BookingService
         return true;
     }
 
+    /// <summary>
+    /// After Book Now, IRCTC may show a station-mismatch confirm dialog (NDLS→CSTM search vs NZM→BDTS train). Click Yes.
+    /// </summary>
+    private async Task AcceptIrctcConfirmationIfPresentAsync(
+        IPage page,
+        AccountModel account,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var dialog = page.Locator("div.ui-confirmdialog").Filter(new LocatorFilterOptions
+        {
+            HasTextRegex = new Regex("Confirmation|continue with", RegexOptions.IgnoreCase)
+        });
+
+        try
+        {
+            await dialog.First.WaitForAsync(new LocatorWaitForOptions
+            {
+                State = WaitForSelectorState.Visible,
+                Timeout = 8_000
+            });
+        }
+        catch (TimeoutException)
+        {
+            Log(account.Username, "Info", "No confirmation dialog (proceeding).");
+            return;
+        }
+
+        var messageLocator = dialog.First.Locator("span.ui-confirmdialog-message");
+        var message = await messageLocator.CountAsync() > 0
+            ? (await messageLocator.InnerTextAsync()).Trim()
+            : (await dialog.First.InnerTextAsync()).Trim();
+        Log(account.Username, "Info", $"Confirmation dialog: {message}");
+
+        var yesButton = dialog.First.Locator("button.ui-confirmdialog-acceptbutton");
+        if (await yesButton.CountAsync() == 0)
+        {
+            yesButton = dialog.First.GetByRole(AriaRole.Button, new LocatorGetByRoleOptions { Name = "Yes" });
+        }
+
+        await yesButton.First.ScrollIntoViewIfNeededAsync();
+        try
+        {
+            await yesButton.First.ClickAsync(new LocatorClickOptions { Force = true, Timeout = 5_000 });
+        }
+        catch (Exception)
+        {
+            await yesButton.First.EvaluateAsync("node => node.click()");
+        }
+
+        Log(account.Username, "Success", "Clicked Yes on confirmation dialog.");
+
+        await dialog.First.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Hidden,
+            Timeout = 15_000
+        });
+    }
+
     private static async Task WaitForExpandedAvailabilityAsync(
         ILocator trainCard,
         CancellationToken cancellationToken)
@@ -1228,6 +1293,8 @@ public sealed class BookingService
         account.UpdateStatus("Passenger Fill");
         account.UpdateLastAction("Entering passenger details.");
         Log(account.Username, "Info", "Filling passenger details.");
+
+        await AcceptIrctcConfirmationIfPresentAsync(page, account, cancellationToken);
 
         for (var i = 0; i < profile.Passengers.Count; i++)
         {
