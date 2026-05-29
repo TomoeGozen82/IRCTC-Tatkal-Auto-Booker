@@ -55,6 +55,7 @@ public sealed class BookingService
             page = await context.NewPageAsync();
             browserSession = new BrowserSessionDiagnostics();
             browserSession.Attach(browser, page);
+            browserSession.Begin();
 
             page.SetDefaultTimeout(profile.DefaultTimeoutMs);
             await page.SetViewportSizeAsync(DesktopViewportWidth, DesktopViewportHeight);
@@ -75,6 +76,12 @@ public sealed class BookingService
             Log(account.Username, "Info", "Booking cancelled by user.");
             return new BookingResult(BookingRunStatus.Failed, "Booking cancelled.");
         }
+        catch (BookingAutomationException ex)
+        {
+            account.UpdateStatus("Failed");
+            Log(account.Username, "Error", ex.Message);
+            return new BookingResult(BookingRunStatus.Failed, ex.Message);
+        }
         catch (Exception ex)
         {
             account.UpdateStatus("Failed");
@@ -82,6 +89,10 @@ public sealed class BookingService
                          ?? FormatExceptionChain(ex);
             Log(account.Username, "Error", detail);
             return new BookingResult(BookingRunStatus.Failed, detail);
+        }
+        finally
+        {
+            browserSession?.End();
         }
     }
 
@@ -658,19 +669,25 @@ public sealed class BookingService
                     await RefreshTrainAvailabilityAsync(trainCard, cancellationToken);
                 }
             }
+            catch (BookingAutomationException ex)
+            {
+                Log(account.Username, "Error", ex.Message);
+                throw;
+            }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                var detail = browserSession.DescribeFailure(
+                if (browserSession.IsUserClosedBrowserDuringSession(page, ex))
+                {
+                    var browserDetail = browserSession.DescribeFailure(page, ex);
+                    Log(account.Username, "Error", browserDetail);
+                    throw new PlaywrightException(browserDetail, ex);
+                }
+
+                var stepDetail = browserSession.DescribeFailure(
                     page,
                     ex,
                     $"Train booking step failed on attempt {attempt}/{profile.MaxRefreshAttempts}");
-
-                Log(account.Username, "Error", detail);
-
-                if (browserSession.IsBrowserClosed(page, ex))
-                {
-                    throw new PlaywrightException(detail, ex);
-                }
+                Log(account.Username, "Error", stepDetail);
 
                 if (ex is TimeoutException && attempt > 1 && !page.IsClosed)
                 {
@@ -704,16 +721,26 @@ public sealed class BookingService
     private static async Task WaitForTrainListAsync(IPage page, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        await page.Locator(TrainListContainerSelector).WaitForAsync(new LocatorWaitForOptions
+        try
         {
-            State = WaitForSelectorState.Visible,
-            Timeout = 30_000
-        });
-        await page.Locator($"{TrainListContainerSelector} {TrainCardSelector}").First.WaitForAsync(new LocatorWaitForOptions
+            await page.Locator(TrainListContainerSelector).WaitForAsync(new LocatorWaitForOptions
+            {
+                State = WaitForSelectorState.Visible,
+                Timeout = 30_000
+            });
+            await page.Locator($"{TrainListContainerSelector} {TrainCardSelector}").First.WaitForAsync(new LocatorWaitForOptions
+            {
+                State = WaitForSelectorState.Visible,
+                Timeout = 30_000
+            });
+        }
+        catch (TimeoutException)
         {
-            State = WaitForSelectorState.Visible,
-            Timeout = 30_000
-        });
+            throw new BookingAutomationException(
+                "WaitForTrainList",
+                "Train search results did not load (no div.trains-div or train cards appeared within 30 seconds). " +
+                "Check that Search Trains completed and IRCTC returned results.");
+        }
     }
 
     /// <summary>STATE 1 — locate the single train card wrapper; all later steps stay scoped here.</summary>
@@ -724,24 +751,73 @@ public sealed class BookingService
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        var trainCard = page.Locator(TrainCardSelector).Filter(new LocatorFilterOptions
+        var trainCards = page.Locator(TrainCardSelector);
+        var count = await trainCards.CountAsync();
+        if (count == 0)
         {
-            HasText = trainNumber
-        });
+            throw new BookingAutomationException(
+                "FindTrainCard",
+                "No train cards found on the results page. The route/date search may have returned zero trains.");
+        }
 
-        await trainCard.First.WaitForAsync(new LocatorWaitForOptions
+        var numbersOnPage = await CollectTrainNumbersOnPageAsync(page);
+
+        for (var i = 0; i < count; i++)
         {
-            State = WaitForSelectorState.Visible,
-            Timeout = 15_000
-        });
+            var card = trainCards.Nth(i);
+            var title = await TryGetTrainCardTitleAsync(card);
+            if (title is null)
+            {
+                continue;
+            }
 
-        return trainCard.First;
+            if (TrainTitleMatchesNumber(title, trainNumber))
+            {
+                return card;
+            }
+        }
+
+        throw new BookingAutomationException(
+            "FindTrainCard",
+            $"Train ({trainNumber}) was not found in the results list. " +
+            $"Scanned {count} train card(s). Numbers on page: {string.Join(", ", numbersOnPage)}.");
+    }
+
+    private static bool TrainTitleMatchesNumber(string title, string trainNumber) =>
+        title.Contains($"({trainNumber})", StringComparison.OrdinalIgnoreCase) ||
+        title.Contains(trainNumber, StringComparison.OrdinalIgnoreCase);
+
+    private static async Task<IReadOnlyList<string>> CollectTrainNumbersOnPageAsync(IPage page)
+    {
+        var headings = page.Locator($"{TrainCardSelector} div.train-heading strong");
+        var count = await headings.CountAsync();
+        var numbers = new List<string>(count);
+
+        for (var i = 0; i < count; i++)
+        {
+            var title = (await headings.Nth(i).InnerTextAsync()).Trim();
+            var match = Regex.Match(title, @"\((\d+)\)");
+            numbers.Add(match.Success ? match.Groups[1].Value : title);
+        }
+
+        return numbers;
+    }
+
+    private static async Task<string?> TryGetTrainCardTitleAsync(ILocator trainCard)
+    {
+        var heading = trainCard.Locator("div.train-heading strong");
+        if (await heading.CountAsync() == 0)
+        {
+            return null;
+        }
+
+        return (await heading.First.InnerTextAsync()).Trim();
     }
 
     private static async Task<string> GetTrainCardTitleAsync(ILocator trainCard)
     {
-        var heading = trainCard.Locator("div.train-heading strong");
-        return (await heading.First.InnerTextAsync()).Trim();
+        return await TryGetTrainCardTitleAsync(trainCard)
+               ?? throw new BookingAutomationException("FindTrainCard", "Train card has no heading text.");
     }
 
     /// <summary>STATE 1 → 2: click class box; use .First to avoid strict-mode violation after tabs appear.</summary>
@@ -752,27 +828,68 @@ public sealed class BookingService
     {
         cancellationToken.ThrowIfCancellationRequested();
         var classCode = travelClass.Trim();
+        var trainTitle = await GetTrainCardTitleAsync(trainCard);
 
         var classCell = trainCard.Locator("div.pre-avl").Filter(new LocatorFilterOptions
         {
             HasText = classCode
         });
 
-        await classCell.First.WaitForAsync(new LocatorWaitForOptions
+        if (await classCell.CountAsync() == 0)
         {
-            State = WaitForSelectorState.Visible,
-            Timeout = 10_000
-        });
+            var available = await CollectClassLabelsOnCardAsync(trainCard);
+            throw new BookingAutomationException(
+                "SelectClass",
+                $"Class '{classCode}' not found on train {trainTitle}. " +
+                $"Classes on card: {(available.Count > 0 ? string.Join(", ", available) : "none visible")}.");
+        }
+
+        try
+        {
+            await classCell.First.WaitForAsync(new LocatorWaitForOptions
+            {
+                State = WaitForSelectorState.Visible,
+                Timeout = 10_000
+            });
+        }
+        catch (TimeoutException)
+        {
+            throw new BookingAutomationException(
+                "SelectClass",
+                $"Class '{classCode}' exists on train {trainTitle} but did not become visible within 10 seconds.");
+        }
 
         await classCell.First.ScrollIntoViewIfNeededAsync();
         await classCell.First.ClickAsync(new LocatorClickOptions { Force = true, Timeout = 5_000 });
 
-        await WaitForExpandedAvailabilityAsync(trainCard, cancellationToken);
+        await WaitForExpandedAvailabilityAsync(trainCard, trainTitle, classCode, cancellationToken);
+    }
+
+    private static async Task<IReadOnlyList<string>> CollectClassLabelsOnCardAsync(ILocator trainCard)
+    {
+        var labels = new List<string>();
+        var classBoxes = trainCard.Locator("div.white-back div.pre-avl strong");
+        var boxCount = await classBoxes.CountAsync();
+        for (var i = 0; i < boxCount; i++)
+        {
+            labels.Add((await classBoxes.Nth(i).InnerTextAsync()).Trim());
+        }
+
+        var tabs = trainCard.Locator("p-tabmenu li.ui-tabmenuitem");
+        var tabCount = await tabs.CountAsync();
+        for (var i = 0; i < tabCount; i++)
+        {
+            labels.Add((await tabs.Nth(i).InnerTextAsync()).Trim());
+        }
+
+        return labels;
     }
 
     /// <summary>Waits for Angular to render STATE 2 (tab menu and/or date row).</summary>
     private static async Task WaitForExpandedAvailabilityAsync(
         ILocator trainCard,
+        string trainTitle,
+        string classCode,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -789,18 +906,28 @@ public sealed class BookingService
         }
         catch (TimeoutException)
         {
-            // STATE 1 with Refresh-only: trigger load then wait again.
             var refreshLink = trainCard.Locator("div.white-back div.pre-avl").Locator("text=/Refresh/i");
             if (await refreshLink.CountAsync() > 0 && await refreshLink.First.IsVisibleAsync())
             {
                 await refreshLink.First.ClickAsync(new LocatorClickOptions { Force = true, Timeout = 5_000 });
             }
 
-            await tabMenu.WaitForAsync(new LocatorWaitForOptions
+            try
             {
-                State = WaitForSelectorState.Visible,
-                Timeout = 15_000
-            });
+                await tabMenu.WaitForAsync(new LocatorWaitForOptions
+                {
+                    State = WaitForSelectorState.Visible,
+                    Timeout = 15_000
+                });
+                return;
+            }
+            catch (TimeoutException)
+            {
+                throw new BookingAutomationException(
+                    "WaitForAvailability",
+                    $"Clicked class '{classCode}' on train {trainTitle}, but the availability panel " +
+                    "(p-tabmenu / date row) did not expand within 30 seconds. Try Refresh on IRCTC.");
+            }
         }
     }
 
@@ -821,6 +948,8 @@ public sealed class BookingService
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        var trainTitle = await GetTrainCardTitleAsync(trainCard);
+        var dateLabelsOnCard = await CollectDateLabelsOnCardAsync(trainCard);
 
         foreach (var label in BuildDateLabelCandidates(journeyDate))
         {
@@ -840,8 +969,28 @@ public sealed class BookingService
             return;
         }
 
-        throw new TimeoutException(
-            $"Could not find date cell for {journeyDate:ddd, d MMM} (e.g. Sat, 30 May) on this train card.");
+        throw new BookingAutomationException(
+            "SelectDate",
+            $"Date {journeyDate:ddd, d MMM} not found on train {trainTitle}. " +
+            $"Dates on card: {(dateLabelsOnCard.Count > 0 ? string.Join(", ", dateLabelsOnCard) : "none visible — expand class first")}.");
+    }
+
+    private static async Task<IReadOnlyList<string>> CollectDateLabelsOnCardAsync(ILocator trainCard)
+    {
+        var labels = new List<string>();
+        var dateHeaders = trainCard.Locator("td.link div.pre-avl strong, div.pre-avl.selected-class strong");
+        var count = await dateHeaders.CountAsync();
+        for (var i = 0; i < count; i++)
+        {
+            var text = (await dateHeaders.Nth(i).InnerTextAsync()).Trim();
+            if (text.Contains(',') || text.Contains("May", StringComparison.OrdinalIgnoreCase) ||
+                text.Contains("Jun", StringComparison.OrdinalIgnoreCase))
+            {
+                labels.Add(text);
+            }
+        }
+
+        return labels;
     }
 
     /// <summary>Reads availability text from the selected date block (AVAILABLE, WL67, etc.).</summary>
@@ -898,6 +1047,14 @@ public sealed class BookingService
         }
 
         return true;
+    }
+
+    private static async Task WaitForExpandedAvailabilityAsync(
+        ILocator trainCard,
+        CancellationToken cancellationToken)
+    {
+        var trainTitle = await GetTrainCardTitleAsync(trainCard);
+        await WaitForExpandedAvailabilityAsync(trainCard, trainTitle, "?", cancellationToken);
     }
 
     private static async Task RefreshTrainAvailabilityAsync(ILocator trainCard, CancellationToken cancellationToken)
@@ -1262,36 +1419,63 @@ public sealed class BookingService
     private sealed class BrowserSessionDiagnostics
     {
         private string? _chromiumCloseReason;
+        private bool _sessionActive;
 
         public void Attach(IBrowser browser, IPage page)
         {
             browser.Disconnected += (_, _) =>
             {
+                if (!_sessionActive)
+                {
+                    return;
+                }
+
                 _chromiumCloseReason ??=
                     "Chromium disconnected (window closed manually, browser crash, or process killed).";
             };
 
             page.Close += (_, _) =>
             {
-                _chromiumCloseReason ??= "Browser tab/page was closed.";
+                if (!_sessionActive)
+                {
+                    return;
+                }
+
+                _chromiumCloseReason ??= "Browser tab/page was closed during automation.";
             };
         }
 
+        public void Begin() => _sessionActive = true;
+
+        public void End() => _sessionActive = false;
+
         public void EnsurePageOpen(IPage page, string step)
         {
-            if (page.IsClosed)
+            if (!page.IsClosed)
             {
-                throw new PlaywrightException(
-                    $"Chromium page is already closed before {step}. " +
-                    (_chromiumCloseReason ?? "Close reason was not captured."));
+                return;
             }
+
+            throw new PlaywrightException(
+                $"Chromium page is already closed before {step}. " +
+                (_chromiumCloseReason ?? "Close reason was not captured."));
         }
 
-        public bool IsBrowserClosed(IPage? page, Exception ex)
+        public bool IsUserClosedBrowserDuringSession(IPage? page, Exception ex)
         {
-            if (_chromiumCloseReason != null || page?.IsClosed == true)
+            if (!_sessionActive)
+            {
+                return false;
+            }
+
+            if (_chromiumCloseReason != null)
             {
                 return true;
+            }
+
+            if (page?.IsClosed == true && ex is PlaywrightException)
+            {
+                return IsBrowserClosedMessage(ex.Message);
             }
 
             for (var current = ex; current != null; current = current.InnerException)
@@ -1307,6 +1491,11 @@ public sealed class BookingService
 
         public string DescribeFailure(IPage? page, Exception ex, string? context = null)
         {
+            if (ex is BookingAutomationException automationEx)
+            {
+                return automationEx.Message;
+            }
+
             var sb = new StringBuilder();
 
             if (!string.IsNullOrWhiteSpace(context))
@@ -1314,28 +1503,37 @@ public sealed class BookingService
                 sb.AppendLine(context);
             }
 
-            if (_chromiumCloseReason != null)
+            if (_sessionActive && _chromiumCloseReason != null)
             {
-                sb.AppendLine($"Chromium closed: {_chromiumCloseReason}");
+                sb.AppendLine($"Chromium closed during automation: {_chromiumCloseReason}");
             }
-            else if (page?.IsClosed == true)
+            else if (_sessionActive && page?.IsClosed == true && IsBrowserClosedMessage(ex.Message))
             {
-                sb.AppendLine("Chromium closed: Page is closed (no disconnect event was captured).");
-            }
-            else if (IsBrowserClosed(page, ex))
-            {
-                sb.AppendLine("Chromium closed: Playwright reported the target/browser was closed.");
+                sb.AppendLine("Chromium closed during automation: Playwright reported the target/browser was closed.");
             }
 
-            sb.AppendLine($"Exception: {FormatExceptionChain(ex)}");
+            sb.AppendLine($"Technical detail: {FormatExceptionChain(ex)}");
 
-            if (!IsBrowserClosed(page, ex) && ex is TimeoutException)
+            if (_sessionActive && !IsUserClosedBrowserDuringSession(page, ex) && ex is TimeoutException)
             {
-                sb.AppendLine("Cause: Playwright wait timed out (browser was still open).");
+                sb.AppendLine(
+                    "Likely cause: a page element did not appear in time (not a browser close). " +
+                    "See the step message above for what was missing.");
             }
 
             return sb.ToString().Trim();
         }
+    }
+}
+
+public sealed class BookingAutomationException : Exception
+{
+    public string Step { get; }
+
+    public BookingAutomationException(string step, string reason)
+        : base($"[{step}] {reason}")
+    {
+        Step = step;
     }
 }
 
