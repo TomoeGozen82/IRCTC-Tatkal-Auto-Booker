@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Net.Http;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Playwright;
@@ -20,6 +21,9 @@ public sealed class BookingService
         BookingProfile profile,
         CancellationToken cancellationToken)
     {
+        IPage? page = null;
+        BrowserSessionDiagnostics? browserSession = null;
+
         try
         {
             account.UpdateStatus("Initializing");
@@ -48,13 +52,16 @@ public sealed class BookingService
                 HasTouch = false
             });
 
-            var page = await context.NewPageAsync();
+            page = await context.NewPageAsync();
+            browserSession = new BrowserSessionDiagnostics();
+            browserSession.Attach(browser, page);
+
             page.SetDefaultTimeout(profile.DefaultTimeoutMs);
             await page.SetViewportSizeAsync(DesktopViewportWidth, DesktopViewportHeight);
 
             await LoginAsync(page, account, cancellationToken);
             await SearchTrainAsync(page, account, profile, cancellationToken);
-            await EnterBookingLoopAsync(page, account, profile, cancellationToken);
+            await EnterBookingLoopAsync(page, browserSession, account, profile, cancellationToken);
             await FillPassengersAsync(page, account, profile, cancellationToken);
             await SolveCaptchaAndSubmitAsync(page, account, profile, cancellationToken);
 
@@ -68,17 +75,13 @@ public sealed class BookingService
             Log(account.Username, "Info", "Booking cancelled by user.");
             return new BookingResult(BookingRunStatus.Failed, "Booking cancelled.");
         }
-        catch (TimeoutException ex)
-        {
-            account.UpdateStatus("Failed");
-            Log(account.Username, "Error", $"Timeout: {ex.Message}");
-            return new BookingResult(BookingRunStatus.Failed, $"Timeout occurred: {ex.Message}");
-        }
         catch (Exception ex)
         {
             account.UpdateStatus("Failed");
-            Log(account.Username, "Error", $"Unexpected failure: {ex.Message}");
-            return new BookingResult(BookingRunStatus.Failed, ex.Message);
+            var detail = browserSession?.DescribeFailure(page, ex)
+                         ?? FormatExceptionChain(ex);
+            Log(account.Username, "Error", detail);
+            return new BookingResult(BookingRunStatus.Failed, detail);
         }
     }
 
@@ -595,6 +598,7 @@ public sealed class BookingService
 
     private async Task EnterBookingLoopAsync(
         IPage page,
+        BrowserSessionDiagnostics browserSession,
         AccountModel account,
         BookingProfile profile,
         CancellationToken cancellationToken)
@@ -618,6 +622,8 @@ public sealed class BookingService
 
             try
             {
+                browserSession.EnsurePageOpen(page, $"availability attempt {attempt}");
+
                 Log(account.Username, "Info",
                     $"Step 1: Finding train card for ({trainNumber}) [STATE 1 — initial card].");
                 var trainCard = await FindTrainCardAsync(page, trainNumber, cancellationToken);
@@ -652,10 +658,21 @@ public sealed class BookingService
                     await RefreshTrainAvailabilityAsync(trainCard, cancellationToken);
                 }
             }
-            catch (TimeoutException ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                Log(account.Username, "Info", $"Attempt {attempt}: {ex.Message}");
-                if (attempt > 1)
+                var detail = browserSession.DescribeFailure(
+                    page,
+                    ex,
+                    $"Train booking step failed on attempt {attempt}/{profile.MaxRefreshAttempts}");
+
+                Log(account.Username, "Error", detail);
+
+                if (browserSession.IsBrowserClosed(page, ex))
+                {
+                    throw new PlaywrightException(detail, ex);
+                }
+
+                if (ex is TimeoutException && attempt > 1 && !page.IsClosed)
                 {
                     await page.ReloadAsync(new PageReloadOptions { WaitUntil = WaitUntilState.DOMContentLoaded });
                     await WaitForTrainListAsync(page, cancellationToken);
@@ -1224,6 +1241,101 @@ public sealed class BookingService
     private void Log(string username, string level, string message)
     {
         LogEmitted?.Invoke(new ServiceLog(username, level, message));
+    }
+
+    private static string FormatExceptionChain(Exception ex)
+    {
+        var parts = new List<string>();
+        for (var current = ex; current != null; current = current.InnerException)
+        {
+            parts.Add($"{current.GetType().Name}: {current.Message}");
+        }
+
+        return string.Join(" → ", parts);
+    }
+
+    private static bool IsBrowserClosedMessage(string message) =>
+        message.Contains("closed", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("disconnected", StringComparison.OrdinalIgnoreCase) ||
+        message.Contains("Target page, context or browser", StringComparison.OrdinalIgnoreCase);
+
+    private sealed class BrowserSessionDiagnostics
+    {
+        private string? _chromiumCloseReason;
+
+        public void Attach(IBrowser browser, IPage page)
+        {
+            browser.Disconnected += (_, _) =>
+            {
+                _chromiumCloseReason ??=
+                    "Chromium disconnected (window closed manually, browser crash, or process killed).";
+            };
+
+            page.Close += (_, _) =>
+            {
+                _chromiumCloseReason ??= "Browser tab/page was closed.";
+            };
+        }
+
+        public void EnsurePageOpen(IPage page, string step)
+        {
+            if (page.IsClosed)
+            {
+                throw new PlaywrightException(
+                    $"Chromium page is already closed before {step}. " +
+                    (_chromiumCloseReason ?? "Close reason was not captured."));
+            }
+        }
+
+        public bool IsBrowserClosed(IPage? page, Exception ex)
+        {
+            if (_chromiumCloseReason != null || page?.IsClosed == true)
+            {
+                return true;
+            }
+
+            for (var current = ex; current != null; current = current.InnerException)
+            {
+                if (current is PlaywrightException && IsBrowserClosedMessage(current.Message))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        public string DescribeFailure(IPage? page, Exception ex, string? context = null)
+        {
+            var sb = new StringBuilder();
+
+            if (!string.IsNullOrWhiteSpace(context))
+            {
+                sb.AppendLine(context);
+            }
+
+            if (_chromiumCloseReason != null)
+            {
+                sb.AppendLine($"Chromium closed: {_chromiumCloseReason}");
+            }
+            else if (page?.IsClosed == true)
+            {
+                sb.AppendLine("Chromium closed: Page is closed (no disconnect event was captured).");
+            }
+            else if (IsBrowserClosed(page, ex))
+            {
+                sb.AppendLine("Chromium closed: Playwright reported the target/browser was closed.");
+            }
+
+            sb.AppendLine($"Exception: {FormatExceptionChain(ex)}");
+
+            if (!IsBrowserClosed(page, ex) && ex is TimeoutException)
+            {
+                sb.AppendLine("Cause: Playwright wait timed out (browser was still open).");
+            }
+
+            return sb.ToString().Trim();
+        }
     }
 }
 
