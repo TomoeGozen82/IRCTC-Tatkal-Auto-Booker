@@ -108,9 +108,11 @@ public sealed class BookingService
         Log(account.Username, "Info", "Typing username and password in login modal.");
         await FillLoginFormAndSubmitAsync(page, account.Username, password, cancellationToken);
 
-        await page.WaitForLoadStateAsync(LoadState.NetworkIdle);
-        account.UpdateLastAction("Login submitted.");
-        Log(account.Username, "Info", "Login submitted.");
+        account.UpdateLastAction("Waiting for train search page.");
+        Log(account.Username, "Info", "Login submitted. Waiting for BOOK TICKET form.");
+        await WaitForTrainSearchFormAsync(page, cancellationToken);
+        account.UpdateLastAction("Login complete.");
+        Log(account.Username, "Info", "Train search form is ready.");
     }
 
     private static async Task FillLoginFormAndSubmitAsync(
@@ -301,15 +303,26 @@ public sealed class BookingService
         Log(account.Username, "Info", $"Searching trains: {profile.FromStation} -> {profile.ToStation}, {profile.JourneyDate:dd/MM/yyyy}, {profile.TravelClass}, {profile.Quota}.");
         cancellationToken.ThrowIfCancellationRequested();
 
+        if (string.IsNullOrWhiteSpace(profile.FromStation) || string.IsNullOrWhiteSpace(profile.ToStation))
+        {
+            throw new InvalidOperationException("From and To station must be set in the booking profile.");
+        }
+
+        await DismissAdOverlaysAsync(page, cancellationToken);
         await WaitForTrainSearchFormAsync(page, cancellationToken);
 
+        Log(account.Username, "Info", $"Typing From station: {profile.FromStation}");
         await FillStationAutocompleteAsync(
             page,
+            formControlName: "origin",
             ariaLabel: "Enter From station. Input is Mandatory.",
             station: profile.FromStation,
             cancellationToken);
+
+        Log(account.Username, "Info", $"Typing To station: {profile.ToStation}");
         await FillStationAutocompleteAsync(
             page,
+            formControlName: "destination",
             ariaLabel: "Enter To station. Input is Mandatory.",
             station: profile.ToStation,
             cancellationToken);
@@ -345,12 +358,48 @@ public sealed class BookingService
     private static async Task WaitForTrainSearchFormAsync(IPage page, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        await page.GetByLabel("Enter From station. Input is Mandatory.", new PageGetByLabelOptions { Exact = true })
-            .WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 20_000 });
+
+        var originInput = await ResolveStationInputAsync(page, "origin", "Enter From station. Input is Mandatory.");
+        await originInput.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 60_000
+        });
+
+        await originInput.ScrollIntoViewIfNeededAsync();
+    }
+
+    private static async Task<ILocator> ResolveStationInputAsync(IPage page, string formControlName, string ariaLabel)
+    {
+        var candidates = new ILocator[]
+        {
+            page.Locator($"p-autocomplete#{formControlName} input.ui-autocomplete-input"),
+            page.Locator($"p-autocomplete[formcontrolname='{formControlName}'] input[role='searchbox']"),
+            page.Locator($"p-autocomplete[formcontrolname='{formControlName}'] input[type='text']"),
+            page.Locator($"input[aria-label='{ariaLabel}']"),
+            page.GetByLabel(ariaLabel, new PageGetByLabelOptions { Exact = true })
+        };
+
+        foreach (var candidate in candidates)
+        {
+            if (await candidate.CountAsync() == 0)
+            {
+                continue;
+            }
+
+            var first = candidate.First;
+            if (await first.IsVisibleAsync())
+            {
+                return first;
+            }
+        }
+
+        throw new TimeoutException($"Could not find station input for '{formControlName}'.");
     }
 
     private static async Task FillStationAutocompleteAsync(
         IPage page,
+        string formControlName,
         string ariaLabel,
         string station,
         CancellationToken cancellationToken)
@@ -358,34 +407,63 @@ public sealed class BookingService
         cancellationToken.ThrowIfCancellationRequested();
         if (string.IsNullOrWhiteSpace(station))
         {
-            throw new InvalidOperationException($"Station value is required for '{ariaLabel}'.");
+            throw new InvalidOperationException($"Station value is required for '{formControlName}'.");
         }
 
-        var input = page.GetByLabel(ariaLabel, new PageGetByLabelOptions { Exact = true });
-        await input.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
-        await input.ClickAsync(new LocatorClickOptions { Force = true });
-        await input.FocusAsync();
+        var input = await ResolveStationInputAsync(page, formControlName, ariaLabel);
+        await input.ScrollIntoViewIfNeededAsync();
+        await input.ClickAsync(new LocatorClickOptions { Force = true, Timeout = 5_000 });
 
-        await page.Keyboard.PressAsync("Control+A");
-        await page.Keyboard.PressAsync("Backspace");
-        await page.Keyboard.TypeAsync(station.Trim(), new KeyboardTypeOptions { Delay = 90 });
+        // Type directly on the autocomplete input (more reliable than page.Keyboard).
+        await input.FillAsync(string.Empty);
+        await input.PressSequentiallyAsync(station.Trim(), new LocatorPressSequentiallyOptions { Delay = 100 });
+        await input.DispatchEventAsync("input");
 
-        await Task.Delay(500, cancellationToken);
+        await Task.Delay(600, cancellationToken);
 
         var listId = await input.GetAttributeAsync("aria-controls");
-        ILocator firstOption;
+        var listSelectors = new List<string>();
         if (!string.IsNullOrWhiteSpace(listId))
         {
-            firstOption = page.Locator($"#{listId} li").First;
+            listSelectors.Add($"#{listId} li");
+            listSelectors.Add($"#{listId} .ui-autocomplete-list-item");
+        }
+
+        listSelectors.Add(".ui-autocomplete-panel:visible li");
+        listSelectors.Add("ul.ui-autocomplete-items li");
+
+        ILocator? firstOption = null;
+        foreach (var selector in listSelectors)
+        {
+            var option = page.Locator(selector).First;
+            try
+            {
+                await option.WaitForAsync(new LocatorWaitForOptions
+                {
+                    State = WaitForSelectorState.Visible,
+                    Timeout = 3_000
+                });
+                firstOption = option;
+                break;
+            }
+            catch (TimeoutException)
+            {
+                // Try next selector.
+            }
+        }
+
+        if (firstOption is null)
+        {
+            // Fallback: pick first highlighted/visible suggestion via keyboard.
+            await input.PressAsync("ArrowDown");
+            await input.PressAsync("Enter");
         }
         else
         {
-            firstOption = page.Locator(".ui-autocomplete-panel li, ul.ui-autocomplete-items li").First;
+            await firstOption.ClickAsync(new LocatorClickOptions { Force = true });
         }
 
-        await firstOption.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 8_000 });
-        await firstOption.ClickAsync(new LocatorClickOptions { Force = true });
-        await Task.Delay(200, cancellationToken);
+        await Task.Delay(300, cancellationToken);
     }
 
     private static async Task FillJourneyDateAsync(IPage page, DateTime journeyDate, CancellationToken cancellationToken)
