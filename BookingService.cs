@@ -94,7 +94,8 @@ public sealed class BookingService
 
         account.UpdateLastAction("Opening login modal.");
         Log(account.Username, "Info", "Opening login modal.");
-        await OpenLoginModalAsync(page, cancellationToken);
+        await EnsureLoginModalVisibleAsync(page, cancellationToken);
+        await WaitForLoginModalAsync(page, cancellationToken);
 
         var password = account.GetDecryptedPassword();
         if (string.IsNullOrWhiteSpace(account.Username) || string.IsNullOrWhiteSpace(password))
@@ -119,19 +120,17 @@ public sealed class BookingService
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        var loginForm = page.Locator("form[formcontrolname='loginForm']");
-        await loginForm.WaitForAsync(new LocatorWaitForOptions
-        {
-            State = WaitForSelectorState.Visible,
-            Timeout = 15_000
-        });
+        await WaitForLoginModalAsync(page, cancellationToken);
 
+        var loginForm = page.Locator("form[formcontrolname='loginForm']");
         var usernameField = await ResolveLoginFieldAsync(
+            page,
             loginForm,
             placeholder: "User Name",
             formControlName: "userId",
             cancellationToken);
         var passwordField = await ResolveLoginFieldAsync(
+            page,
             loginForm,
             placeholder: "Password",
             formControlName: "password",
@@ -164,6 +163,7 @@ public sealed class BookingService
     }
 
     private static async Task<ILocator> ResolveLoginFieldAsync(
+        IPage page,
         ILocator loginForm,
         string placeholder,
         string formControlName,
@@ -171,9 +171,20 @@ public sealed class BookingService
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        var byPlaceholder = loginForm.GetByPlaceholder(placeholder);
+        var byPlaceholder = page.GetByPlaceholder(placeholder, new PageGetByPlaceholderOptions { Exact = true });
         if (await byPlaceholder.CountAsync() > 0)
         {
+            var visible = byPlaceholder.Locator("visible=true");
+            if (await visible.CountAsync() > 0)
+            {
+                await visible.First.WaitForAsync(new LocatorWaitForOptions
+                {
+                    State = WaitForSelectorState.Visible,
+                    Timeout = 10_000
+                });
+                return visible.First;
+            }
+
             await byPlaceholder.First.WaitForAsync(new LocatorWaitForOptions
             {
                 State = WaitForSelectorState.Visible,
@@ -191,6 +202,37 @@ public sealed class BookingService
         return byFormControl.First;
     }
 
+    private static async Task<bool> IsLoginModalVisibleAsync(IPage page)
+    {
+        if (await page.GetByPlaceholder("User Name", new PageGetByPlaceholderOptions { Exact = true }).IsVisibleAsync())
+        {
+            return true;
+        }
+
+        return await page.Locator("form[formcontrolname='loginForm'] input[formcontrolname='userId']").IsVisibleAsync();
+    }
+
+    private static async Task WaitForLoginModalAsync(IPage page, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var usernameField = page.GetByPlaceholder("User Name", new PageGetByPlaceholderOptions { Exact = true });
+        try
+        {
+            await usernameField.WaitForAsync(new LocatorWaitForOptions
+            {
+                State = WaitForSelectorState.Visible,
+                Timeout = 15_000
+            });
+            return;
+        }
+        catch (TimeoutException)
+        {
+            await page.Locator("form[formcontrolname='loginForm'] input[formcontrolname='userId']").WaitForAsync(
+                new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 15_000 });
+        }
+    }
+
     private static async Task TypeIntoLoginFieldAsync(
         IPage page,
         ILocator field,
@@ -203,11 +245,11 @@ public sealed class BookingService
         await field.WaitForAsync(new LocatorWaitForOptions { State = WaitForSelectorState.Visible, Timeout = 10_000 });
         await field.ScrollIntoViewIfNeededAsync();
         await field.ClickAsync(new LocatorClickOptions { Force = true, Timeout = 5_000 });
+        await field.FocusAsync();
 
-        // Clear the field, then type one character at a time like a human.
         await page.Keyboard.PressAsync("Control+A");
         await page.Keyboard.PressAsync("Backspace");
-        await field.PressSequentiallyAsync(text, new LocatorPressSequentiallyOptions { Delay = delayMs });
+        await page.Keyboard.TypeAsync(text, new KeyboardTypeOptions { Delay = delayMs });
 
         await field.DispatchEventAsync("input");
         await field.DispatchEventAsync("change");
@@ -381,21 +423,20 @@ public sealed class BookingService
         throw new TimeoutException("Captcha solve timed out.");
     }
 
-    private static async Task OpenLoginModalAsync(IPage page, CancellationToken cancellationToken)
+    private static async Task EnsureLoginModalVisibleAsync(IPage page, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
-        // IRCTC is an Angular SPA; header controls render after DOMContentLoaded.
         await page.WaitForLoadStateAsync(LoadState.Load);
-        await TryDismissBlockingOverlaysAsync(page);
 
-        var loginForm = page.Locator("form[formcontrolname='loginForm']");
-        var loginModalInput = loginForm.GetByPlaceholder("User Name");
-        if (await loginModalInput.CountAsync() == 0)
+        if (await IsLoginModalVisibleAsync(page))
         {
-            loginModalInput = loginForm.Locator("input[formcontrolname='userId']");
+            return;
         }
-        if (await loginModalInput.IsVisibleAsync())
+
+        await DismissAdOverlaysAsync(page, cancellationToken);
+
+        if (await IsLoginModalVisibleAsync(page))
         {
             return;
         }
@@ -411,58 +452,107 @@ public sealed class BookingService
         foreach (var candidate in loginButtonCandidates)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!await ClickFirstVisibleAsync(candidate, cancellationToken))
+
+            if (await IsLoginModalVisibleAsync(page))
+            {
+                return;
+            }
+
+            await TryOpenLoginWithJsClickAsync(candidate, cancellationToken);
+            await Task.Delay(400, cancellationToken);
+
+            if (await IsLoginModalVisibleAsync(page))
+            {
+                return;
+            }
+        }
+
+        if (!await IsLoginModalVisibleAsync(page))
+        {
+            throw new TimeoutException("Could not open the LOGIN / REGISTER modal.");
+        }
+    }
+
+    private static async Task TryOpenLoginWithJsClickAsync(ILocator locator, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var count = await locator.CountAsync();
+        for (var i = 0; i < count; i++)
+        {
+            var target = locator.Nth(i);
+            if (!await target.IsVisibleAsync())
+            {
+                continue;
+            }
+
+            await target.EvaluateAsync("node => node.click()");
+            return;
+        }
+    }
+
+    private static async Task DismissAdOverlaysAsync(IPage page, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (await IsLoginModalVisibleAsync(page))
+        {
+            return;
+        }
+
+        // Only close dialogs that are NOT the login modal (Escape would close login too).
+        var nonLoginDialogs = page.Locator(".ui-dialog-visible").Filter(new LocatorFilterOptions
+        {
+            HasNot = page.Locator("form[formcontrolname='loginForm']")
+        });
+
+        var closeButtons = nonLoginDialogs.Locator(
+            ".ui-dialog-titlebar-close, button:has-text('OK'), button:has-text('Close'), button:has-text('Accept')");
+        var count = await closeButtons.CountAsync();
+        for (var i = 0; i < count; i++)
+        {
+            var button = closeButtons.Nth(i);
+            if (!await button.IsVisibleAsync())
             {
                 continue;
             }
 
             try
             {
-                await loginModalInput.WaitForAsync(new LocatorWaitForOptions
-                {
-                    State = WaitForSelectorState.Visible,
-                    Timeout = 8_000
-                });
-                return;
+                await button.ClickAsync(new LocatorClickOptions { Timeout = 1_500, Force = true });
             }
-            catch (TimeoutException)
+            catch (Exception)
             {
-                // Try the next selector strategy.
+                // Ignore and continue.
             }
         }
 
-        throw new TimeoutException("Could not open the LOGIN / REGISTER modal.");
-    }
-
-    private static async Task TryDismissBlockingOverlaysAsync(IPage page)
-    {
-        var dismissSelectors = new[]
+        if (await IsLoginModalVisibleAsync(page))
         {
-            "button:has-text('OK')",
-            "button:has-text('Close')",
-            "button:has-text('Accept')",
-            ".modal-dialog button.close",
-            "img[alt='Close']"
-        };
-
-        foreach (var selector in dismissSelectors)
-        {
-            var button = page.Locator(selector).First;
-            if (await button.IsVisibleAsync())
-            {
-                try
-                {
-                    await button.ClickAsync(new LocatorClickOptions { Timeout = 2_000 });
-                }
-                catch (PlaywrightException)
-                {
-                    // Ignore and continue.
-                }
-            }
+            return;
         }
+
+        // Remove only backdrop masks that block the header, not the login dialog content.
+        await page.EvaluateAsync("""
+            () => {
+                const hasLoginForm = document.querySelector("form[formcontrolname='loginForm']");
+                if (hasLoginForm) {
+                    return;
+                }
+
+                document.querySelectorAll(
+                    '.ui-dialog-mask, .ui-widget-overlay.ui-dialog-visible'
+                ).forEach(el => el.remove());
+                document.body.classList.remove('ui-dialog-mask-scrollblocker');
+                document.body.style.overflow = '';
+            }
+            """);
     }
 
-    private static async Task<bool> ClickFirstVisibleAsync(ILocator locator, CancellationToken cancellationToken)
+    private static async Task<bool> ClickFirstVisibleAsync(
+        IPage page,
+        ILocator locator,
+        CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -505,15 +595,28 @@ public sealed class BookingService
         }
 
         await target.ScrollIntoViewIfNeededAsync();
+
         try
         {
-            await target.ClickAsync(new LocatorClickOptions { Timeout = 8_000 });
+            await target.ClickAsync(new LocatorClickOptions { Timeout = 2_000 });
+            return true;
         }
-        catch (PlaywrightException)
+        catch (Exception)
         {
-            await target.EvaluateAsync("node => node.click()");
+            // Overlay (ui-dialog-mask) often blocks normal clicks on IRCTC.
         }
 
+        try
+        {
+            await target.ClickAsync(new LocatorClickOptions { Timeout = 2_000, Force = true });
+            return true;
+        }
+        catch (Exception)
+        {
+            // Fall through to DOM click.
+        }
+
+        await target.EvaluateAsync("node => node.click()");
         return true;
     }
 
