@@ -242,7 +242,7 @@
                                 </DataGrid.Columns>
                             </DataGrid>
                             <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
-                                <Button Content="Book" Margin="0,0,8,0" Command="{Binding BookSelectedAccountCommand}" />
+                                <Button Content="{Binding SelectedAccountBookButtonText}" Margin="0,0,8,0" Command="{Binding BookSelectedAccountCommand}" />
                                 <Button Content="{Binding SelectedAccountActionButtonText}"
                                         Margin="0,0,8,0"
                                         Command="{Binding ToggleSelectedAccountActionCommand}">

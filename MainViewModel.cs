@@ -44,6 +44,7 @@ public partial class MainViewModel : ObservableObject
     [ObservableProperty] private string schedulerStatus = "Idle";
     [ObservableProperty] private bool isScheduleActive;
     [ObservableProperty] private AccountViewModel? selectedAccountItem;
+    [ObservableProperty] private string selectedAccountBookButtonText = "Book";
     [ObservableProperty] private string selectedAccountActionButtonText = "Start";
     [ObservableProperty] private bool isSelectedAccountActionRunning;
     
@@ -241,7 +242,9 @@ public partial class MainViewModel : ObservableObject
             return;
         }
 
-        OnBookRequestedForAccount(SelectedAccountItem);
+        OpenBookingSetupForAccount(
+            SelectedAccountItem,
+            editExisting: HasSavedBooking(SelectedAccountItem.Model.Id));
     }
 
     [RelayCommand(CanExecute = nameof(CanToggleSelectedAccountAction))]
@@ -641,6 +644,33 @@ public partial class MainViewModel : ObservableObject
         var isRunning = SelectedAccountItem is not null && GetActiveJobForAccount(SelectedAccountItem.Model) is not null;
         IsSelectedAccountActionRunning = isRunning;
         SelectedAccountActionButtonText = isRunning ? "Stop" : "Start";
+
+        var hasBooking = SelectedAccountItem is not null && HasSavedBooking(SelectedAccountItem.Model.Id);
+        SelectedAccountBookButtonText = hasBooking ? "Edit Book" : "Book";
+    }
+
+    private bool HasSavedBooking(Guid accountId) => _accountBookingProfiles.ContainsKey(accountId);
+
+    private void SaveBookingProfileForAccount(Guid accountId, DomainBookingProfile profile)
+    {
+        var isUpdate = _accountBookingProfiles.ContainsKey(accountId);
+        _accountBookingProfiles[accountId] = profile;
+
+        var existingInList = BookingProfiles.FirstOrDefault(p =>
+            p.ProfileName.Equals(profile.ProfileName, StringComparison.OrdinalIgnoreCase));
+        if (existingInList is not null)
+        {
+            var index = BookingProfiles.IndexOf(existingInList);
+            BookingProfiles[index] = profile;
+        }
+        else
+        {
+            BookingProfiles.Add(profile);
+        }
+
+        AddLog("Success", isUpdate
+            ? $"Booking updated for {IrctcAccounts.FirstOrDefault(a => a.Id == accountId)?.Username ?? "account"}. Use Start to run."
+            : $"Booking saved for {IrctcAccounts.FirstOrDefault(a => a.Id == accountId)?.Username ?? "account"}. Use Start to run.");
     }
 
     private static DomainBookingProfile ToDomainProfile(BookingProfile profile, string name)
@@ -765,6 +795,7 @@ public partial class MainViewModel : ObservableObject
                 _accountBookingProfiles[kv.Key] = kv.Value;
             }
             RefreshAccountItems();
+            UpdateSelectedAccountActionButton();
 
             ScheduledStartDate = state.SchedulerSettings.StartTime.Date;
             ScheduledStartTimeText = state.SchedulerSettings.StartTime.ToString("HH:mm:ss");
@@ -801,25 +832,53 @@ public partial class MainViewModel : ObservableObject
         }
     }
 
-    private void OnBookRequestedForAccount(AccountViewModel accountItem)
+    private void OpenBookingSetupForAccount(AccountViewModel accountItem, bool editExisting)
     {
-        AddLog("Info", $"Booking setup window opened for account {accountItem.Username}.");
+        DomainBookingProfile? existingProfile = null;
+        if (editExisting)
+        {
+            if (!_accountBookingProfiles.TryGetValue(accountItem.Model.Id, out existingProfile))
+            {
+                AddLog("Error", $"No saved booking for {accountItem.Username}. Use Book first.");
+                return;
+            }
+        }
+
+        AddLog("Info", editExisting
+            ? $"Edit booking opened for {accountItem.Username}."
+            : $"Booking setup opened for {accountItem.Username}.");
+
         var setup = new BookingSetupViewModel(
             accountItem,
             quotaOptions: ["TATKAL", "GENERAL", "PREMIUM TATKAL"],
             classOptions: ["SL", "3A", "2A", "1A", "CC", "2S"],
             logger: AddLog);
 
+        if (existingProfile is not null)
+        {
+            setup.LoadExistingProfile(existingProfile);
+        }
+
         setup.StartRequested += profile =>
         {
-            _accountBookingProfiles[accountItem.Model.Id] = profile;
-            AddLog("Success", $"Booking saved for {accountItem.Username}. Use Start to run.");
+            SaveBookingProfileForAccount(accountItem.Model.Id, profile);
             _ = PersistStateAsync();
             UpdateSelectedAccountActionButton();
             ToggleSelectedAccountActionCommand.NotifyCanExecuteChanged();
         };
 
         BookingSetupRequested?.Invoke(setup);
+    }
+
+    private void OnBookRequestedForAccount(AccountViewModel accountItem)
+    {
+        if (HasSavedBooking(accountItem.Model.Id))
+        {
+            OpenBookingSetupForAccount(accountItem, editExisting: true);
+            return;
+        }
+
+        OpenBookingSetupForAccount(accountItem, editExisting: false);
     }
 
     private void AddLog(string level, string message) => RunOnUi(() => Logs.Add(new LogEntry(level, message)));

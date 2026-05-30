@@ -20,6 +20,9 @@ public partial class BookingSetupViewModel : ObservableObject
     [ObservableProperty] private DateTime startDate = DateTime.Today;
     [ObservableProperty] private string startTimeText = "09:59:50";
     [ObservableProperty] private PassengerEditorModel? selectedPassenger;
+    [ObservableProperty] private bool isEditMode;
+
+    private string _existingProfileName = string.Empty;
 
     public BookingSetupViewModel(AccountViewModel account, IEnumerable<string> quotaOptions, IEnumerable<string> classOptions, Action<string, string> logger)
     {
@@ -34,6 +37,60 @@ public partial class BookingSetupViewModel : ObservableObject
     public ObservableCollection<string> QuotaOptions { get; }
     public ObservableCollection<string> ClassOptions { get; }
     public ObservableCollection<PassengerEditorModel> Passengers { get; }
+
+    public string WindowTitle => IsEditMode
+        ? $"Edit Booking — {Account.Username}"
+        : $"Booking Setup — {Account.Username}";
+
+    public string SaveButtonText => IsEditMode ? "Update Booking" : "Save Booking";
+
+    public void LoadExistingProfile(DomainBookingProfile profile)
+    {
+        IsEditMode = true;
+        _existingProfileName = profile.ProfileName;
+
+        FromStation = profile.FromStation;
+        ToStation = profile.ToStation;
+        JourneyDate = profile.JourneyDate;
+        SelectedQuota = string.IsNullOrWhiteSpace(profile.Quota) ? "TATKAL" : profile.Quota;
+        PreferredTrainNumbers = profile.PreferredTrainNumbers;
+        ClassPriority = string.IsNullOrWhiteSpace(profile.ClassPriority) ? "3A" : profile.ClassPriority;
+
+        var sched = profile.SchedulerSettings;
+        EnableScheduler = sched.StartTime > DateTime.MinValue.AddDays(1);
+        if (EnableScheduler)
+        {
+            StartDate = sched.StartTime.Date;
+            StartTimeText = sched.StartTime.ToString("HH:mm:ss");
+        }
+
+        Passengers.Clear();
+        foreach (var p in profile.PassengerList)
+        {
+            Passengers.Add(new PassengerEditorModel
+            {
+                Name = p.Name,
+                Age = p.Age,
+                Gender = PassengerFieldOptions.CoerceGender(p.Gender),
+                Country = PassengerFieldOptions.CoerceCountry(p.Country),
+                Berth = PassengerFieldOptions.CoerceBerth(p.Berth)
+            });
+        }
+
+        if (Passengers.Count == 0)
+        {
+            Passengers.Add(new PassengerEditorModel());
+        }
+
+        OnPropertyChanged(nameof(WindowTitle));
+        OnPropertyChanged(nameof(SaveButtonText));
+    }
+
+    partial void OnIsEditModeChanged(bool value)
+    {
+        OnPropertyChanged(nameof(WindowTitle));
+        OnPropertyChanged(nameof(SaveButtonText));
+    }
 
     public event Action<DomainBookingProfile>? StartRequested;
     public event Action<bool>? RequestClose;
@@ -70,7 +127,9 @@ public partial class BookingSetupViewModel : ObservableObject
 
         var profile = new DomainBookingProfile
         {
-            ProfileName = $"Adhoc-{Account.Username}-{DateTime.Now:HHmmss}",
+            ProfileName = IsEditMode && !string.IsNullOrWhiteSpace(_existingProfileName)
+                ? _existingProfileName
+                : $"Adhoc-{Account.Username}-{DateTime.Now:HHmmss}",
             FromStation = FromStation.Trim(),
             ToStation = ToStation.Trim(),
             JourneyDate = JourneyDate.Date,
@@ -95,7 +154,9 @@ public partial class BookingSetupViewModel : ObservableObject
             }).ToList()
         };
 
-        _log("Info", $"Booking saved: account={Account.Username}, from={profile.FromStation}, to={profile.ToStation}, date={profile.JourneyDate:dd-MMM-yyyy}, quota={profile.Quota}, trains={profile.PreferredTrainNumbers}, class={profile.ClassPriority}, pax={profile.PassengerList.Count}");
+        _log("Info", IsEditMode
+            ? $"Booking updated: account={Account.Username}, from={profile.FromStation}, to={profile.ToStation}, date={profile.JourneyDate:dd-MMM-yyyy}, quota={profile.Quota}, trains={profile.PreferredTrainNumbers}, class={profile.ClassPriority}, pax={profile.PassengerList.Count}"
+            : $"Booking saved: account={Account.Username}, from={profile.FromStation}, to={profile.ToStation}, date={profile.JourneyDate:dd-MMM-yyyy}, quota={profile.Quota}, trains={profile.PreferredTrainNumbers}, class={profile.ClassPriority}, pax={profile.PassengerList.Count}");
         StartRequested?.Invoke(profile);
         RequestClose?.Invoke(true);
     }
