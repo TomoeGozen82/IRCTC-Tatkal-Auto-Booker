@@ -612,9 +612,21 @@ public sealed class BookingService
             State = WaitForSelectorState.Visible,
             Timeout = 15_000
         });
-        await dropdown.First.ScrollIntoViewIfNeededAsync();
 
-        var trigger = dropdown.First.Locator(".ui-dropdown-trigger, .p-dropdown-trigger, [role='button']").First;
+        await SelectPrimeNgDropdownLocatorAsync(page, dropdown.First, formControlName, shortCode, cancellationToken);
+    }
+
+    private static async Task SelectPrimeNgDropdownLocatorAsync(
+        IPage page,
+        ILocator dropdown,
+        string fieldLabel,
+        string shortCode,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        await dropdown.ScrollIntoViewIfNeededAsync();
+
+        var trigger = dropdown.Locator(".ui-dropdown-trigger, .p-dropdown-trigger, [role='button']").First;
         await trigger.ClickAsync(new LocatorClickOptions { Force = true, Timeout = 5_000 });
 
         ILocator? panel = null;
@@ -647,7 +659,7 @@ public sealed class BookingService
         if (panel is null)
         {
             throw new InvalidOperationException(
-                $"Dropdown '{formControlName}' opened but no options panel appeared. " +
+                $"Dropdown '{fieldLabel}' opened but no options panel appeared. " +
                 "A calendar or overlay may be blocking the form.");
         }
 
@@ -660,7 +672,7 @@ public sealed class BookingService
         {
             var labels = await CollectDropdownOptionLabelsAsync(panel);
             throw new InvalidOperationException(
-                $"Could not find '{shortCode}' in {formControlName} dropdown. " +
+                $"Could not find '{shortCode}' in {fieldLabel} dropdown. " +
                 $"Options visible: {(labels.Count > 0 ? string.Join(", ", labels) : "none")}.");
         }
 
@@ -1292,23 +1304,144 @@ public sealed class BookingService
     {
         account.UpdateStatus("Passenger Fill");
         account.UpdateLastAction("Entering passenger details.");
-        Log(account.Username, "Info", "Filling passenger details.");
+        Log(account.Username, "Info", "Passenger page: waiting for app-passenger form.");
 
         await AcceptIrctcConfirmationIfPresentAsync(page, account, cancellationToken);
+
+        var passengerPanel = page.Locator("p-panel .p-heading, span.ui-panel-title")
+            .Filter(new LocatorFilterOptions { HasTextRegex = new Regex("Passenger\\s*Details", RegexOptions.IgnoreCase) });
+        if (await passengerPanel.CountAsync() > 0)
+        {
+            Log(account.Username, "Info", "Passenger Details panel found.");
+        }
+
+        await page.Locator("app-passenger").First.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 30_000
+        });
 
         for (var i = 0; i < profile.Passengers.Count; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var p = profile.Passengers[i];
-            var row = i + 1;
-            await page.FillAsync($"input[formcontrolname='passengerName{row}']", p.Name);
-            await page.FillAsync($"input[formcontrolname='passengerAge{row}']", p.Age.ToString());
-            await page.SelectOptionAsync($"select[formcontrolname='passengerGender{row}']", p.Gender);
-            await page.SelectOptionAsync($"select[formcontrolname='passengerBerthChoice{row}']", p.BerthPreference);
+
+            if (i > 0)
+            {
+                Log(account.Username, "Info", $"Passenger {i + 1}: clicking + Add Passenger.");
+                await ClickAddPassengerAsync(page, cancellationToken);
+                await page.Locator("app-passenger").Nth(i).WaitForAsync(new LocatorWaitForOptions
+                {
+                    State = WaitForSelectorState.Visible,
+                    Timeout = 15_000
+                });
+            }
+
+            var genderCode = PassengerValueNormalizer.ToIrctcGenderCode(p.Gender);
+            var nationalityCode = PassengerValueNormalizer.ToIrctcNationalityCode(p.Country);
+            var berthCode = PassengerValueNormalizer.ToIrctcBerthCode(p.Berth);
+
+            Log(account.Username, "Info",
+                $"Passenger {i + 1}/{profile.Passengers.Count}: name={p.Name}, age={p.Age}, " +
+                $"gender={genderCode}, nationality={nationalityCode}, berth={(string.IsNullOrEmpty(berthCode) ? "No Preference" : berthCode)}.");
+
+            await FillPassengerRowAsync(
+                page, i, p.Name, p.Age, genderCode, nationalityCode, berthCode, p.Country, cancellationToken);
         }
 
         account.UpdateLastAction("Passenger details entered.");
-        Log(account.Username, "Success", "Passenger details submitted.");
+        Log(account.Username, "Success", $"Passenger details filled ({profile.Passengers.Count} row(s)).");
+    }
+
+    private static async Task ClickAddPassengerAsync(IPage page, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var addPassenger = page.Locator("a").Filter(new LocatorFilterOptions
+        {
+            Has = page.Locator("span.prenext").Filter(new LocatorFilterOptions
+            {
+                HasTextRegex = new Regex(@"^\+\s*Add\s+Passenger\s*$", RegexOptions.IgnoreCase)
+            })
+        });
+
+        if (await addPassenger.CountAsync() == 0)
+        {
+            addPassenger = page.GetByText("+ Add Passenger", new PageGetByTextOptions { Exact = true });
+        }
+
+        await addPassenger.First.ScrollIntoViewIfNeededAsync();
+        await addPassenger.First.ClickAsync(new LocatorClickOptions { Force = true, Timeout = 5_000 });
+        await Task.Delay(800, cancellationToken);
+    }
+
+    private static async Task FillPassengerRowAsync(
+        IPage page,
+        int passengerIndex,
+        string name,
+        int age,
+        string genderCode,
+        string nationalityCode,
+        string berthCode,
+        string countryLabel,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var trimmedName = name.Trim();
+        if (trimmedName.Length < 3 || trimmedName.Length > 16)
+        {
+            throw new BookingAutomationException(
+                "FillPassengerName",
+                $"Passenger {passengerIndex + 1} name must be 3–16 characters (IRCTC rule). Got length {trimmedName.Length}.");
+        }
+
+        var passengerForm = page.Locator("app-passenger").Nth(passengerIndex);
+        await passengerForm.ScrollIntoViewIfNeededAsync();
+
+        var nameInput = passengerForm.Locator(
+            "p-autocomplete[formcontrolname='passengerName'] input.ui-autocomplete-input, input[placeholder='Name']");
+        await nameInput.First.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 10_000
+        });
+
+        var nameField = nameInput.First;
+        await nameField.ClickAsync(new LocatorClickOptions { Force = true });
+        await nameField.FillAsync(string.Empty);
+        await nameField.PressSequentiallyAsync(trimmedName, new LocatorPressSequentiallyOptions { Delay = 60 });
+        await page.Keyboard.PressAsync("Escape");
+        await Task.Delay(200, cancellationToken);
+
+        var ageInput = passengerForm.Locator("input[formcontrolname='passengerAge']");
+        await ageInput.FillAsync(age.ToString(CultureInfo.InvariantCulture));
+
+        await passengerForm.Locator("select[formcontrolname='passengerGender']")
+            .SelectOptionAsync(new SelectOptionValue { Value = genderCode });
+
+        var nationalitySelect = passengerForm.Locator("select[formcontrolname='passengerNationality']");
+        try
+        {
+            await nationalitySelect.SelectOptionAsync(new SelectOptionValue { Value = nationalityCode });
+        }
+        catch (PlaywrightException)
+        {
+            await nationalitySelect.SelectOptionAsync(new SelectOptionValue
+            {
+                Label = PassengerValueNormalizer.NormalizeCountry(countryLabel)
+            });
+        }
+
+        var berthSelect = passengerForm.Locator("select[formcontrolname='passengerBerthChoice']");
+        if (string.IsNullOrEmpty(berthCode))
+        {
+            await berthSelect.SelectOptionAsync(new SelectOptionValue { Index = 0 });
+        }
+        else
+        {
+            await berthSelect.SelectOptionAsync(new SelectOptionValue { Value = berthCode });
+        }
     }
 
     private async Task SolveCaptchaAndSubmitAsync(

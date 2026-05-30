@@ -661,7 +661,8 @@ public partial class MainViewModel : ObservableObject
                 Name = x.Name,
                 Age = x.Age,
                 Gender = x.Gender,
-                BerthPreference = x.BerthPreference
+                Country = x.Country,
+                Berth = x.Berth
             }).ToList()
         };
         return p;
@@ -724,7 +725,12 @@ public partial class MainViewModel : ObservableObject
 
         foreach (var p in profile.PassengerList)
         {
-            legacy.Passengers.Add(new PassengerModel(p.Name, p.Age, p.Gender, p.BerthPreference));
+            legacy.Passengers.Add(new PassengerModel(
+                p.Name,
+                p.Age,
+                PassengerValueNormalizer.NormalizeGender(p.Gender),
+                PassengerValueNormalizer.NormalizeCountry(p.Country),
+                PassengerValueNormalizer.NormalizeBerth(p.Berth)));
         }
         return legacy;
     }
@@ -920,18 +926,20 @@ public sealed class BookingProfile
 
 public sealed class PassengerModel
 {
-    public PassengerModel(string name, int age, string gender, string berthPreference)
+    public PassengerModel(string name, int age, string gender, string country, string berth)
     {
         Name = name;
         Age = age;
-        Gender = gender;
-        BerthPreference = berthPreference;
+        Gender = PassengerValueNormalizer.NormalizeGender(gender);
+        Country = PassengerValueNormalizer.NormalizeCountry(country);
+        Berth = PassengerValueNormalizer.NormalizeBerth(berth);
     }
 
     public string Name { get; }
     public int Age { get; }
     public string Gender { get; }
-    public string BerthPreference { get; }
+    public string Country { get; }
+    public string Berth { get; }
 }
 
 public class LogEntry

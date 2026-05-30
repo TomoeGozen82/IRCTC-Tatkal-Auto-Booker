@@ -4,6 +4,7 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes"
+        xmlns:booking="clr-namespace:Booking"
         mc:Ignorable="d"
         Title="Booking Setup"
         Height="760"
@@ -68,8 +69,15 @@
                             <DataGrid.Columns>
                                 <DataGridTextColumn Header="Name" Binding="{Binding Name, UpdateSourceTrigger=PropertyChanged}" Width="2*" />
                                 <DataGridTextColumn Header="Age" Binding="{Binding Age, UpdateSourceTrigger=PropertyChanged}" Width="*" />
-                                <DataGridTextColumn Header="Gender" Binding="{Binding Gender, UpdateSourceTrigger=PropertyChanged}" Width="*" />
-                                <DataGridTextColumn Header="Berth" Binding="{Binding BerthPreference, UpdateSourceTrigger=PropertyChanged}" Width="*" />
+                                <DataGridComboBoxColumn Header="Gender" Width="*"
+                                                        SelectedItemBinding="{Binding Gender, UpdateSourceTrigger=PropertyChanged}"
+                                                        ItemsSource="{x:Static booking:PassengerFieldOptions.Genders}" />
+                                <DataGridComboBoxColumn Header="Country" Width="1.4*"
+                                                        SelectedItemBinding="{Binding Country, UpdateSourceTrigger=PropertyChanged}"
+                                                        ItemsSource="{x:Static booking:PassengerFieldOptions.Countries}" />
+                                <DataGridComboBoxColumn Header="Berth" Width="1.2*"
+                                                        SelectedItemBinding="{Binding Berth, UpdateSourceTrigger=PropertyChanged}"
+                                                        ItemsSource="{x:Static booking:PassengerFieldOptions.Berths}" />
                             </DataGrid.Columns>
                         </DataGrid>
 

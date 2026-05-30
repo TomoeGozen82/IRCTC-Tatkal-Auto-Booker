@@ -41,8 +41,9 @@ public partial class BookingConfigurationViewModel : ObservableObject
             {
                 Name = p.Name,
                 Age = p.Age,
-                Gender = p.Gender,
-                BerthPreference = p.BerthPreference
+                Gender = PassengerFieldOptions.CoerceGender(p.Gender),
+                Country = PassengerFieldOptions.CoerceCountry(p.Country),
+                Berth = PassengerFieldOptions.CoerceBerth(p.Berth)
             }));
 
         if (Passengers.Count == 0)
@@ -133,7 +134,8 @@ public partial class BookingConfigurationViewModel : ObservableObject
                 passenger.Name.Trim(),
                 passenger.Age,
                 passenger.Gender.Trim(),
-                passenger.BerthPreference.Trim()));
+                passenger.Country.Trim(),
+                passenger.Berth.Trim()));
         }
 
         _log("Success", "Booking configuration accepted. Starting automation.");
@@ -154,9 +156,14 @@ public partial class BookingConfigurationViewModel : ObservableObject
             errors.Add("Add at least one passenger.");
         }
 
-        if (Passengers.Any(p => string.IsNullOrWhiteSpace(p.Name) || p.Age <= 0))
+        if (Passengers.Any(p =>
+                string.IsNullOrWhiteSpace(p.Name) ||
+                p.Age <= 0 ||
+                string.IsNullOrWhiteSpace(p.Gender) ||
+                string.IsNullOrWhiteSpace(p.Country) ||
+                string.IsNullOrWhiteSpace(p.Berth)))
         {
-            errors.Add("Passenger details are incomplete.");
+            errors.Add("Passenger details are incomplete (name, age, gender, country, berth).");
         }
 
         if (string.IsNullOrWhiteSpace(PreferredTrainNumbers))
@@ -187,8 +194,9 @@ public partial class PassengerEditorModel : ObservableObject
 {
     [ObservableProperty] private string name = string.Empty;
     [ObservableProperty] private int age = 30;
-    [ObservableProperty] private string gender = "M";
-    [ObservableProperty] private string berthPreference = "LB";
+    [ObservableProperty] private string gender = "Male";
+    [ObservableProperty] private string country = "India";
+    [ObservableProperty] private string berth = "No Preference";
 }
 
 public partial class AccountSelectionItem : ObservableObject

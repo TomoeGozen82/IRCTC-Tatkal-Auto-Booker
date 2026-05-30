@@ -66,8 +66,23 @@ public sealed class PassengerRecord
 {
     public string Name { get; set; } = string.Empty;
     public int Age { get; set; } = 30;
-    public string Gender { get; set; } = "M";
-    public string BerthPreference { get; set; } = "LB";
+    public string Gender { get; set; } = "Male";
+    public string Country { get; set; } = "India";
+    public string Berth { get; set; } = "No Preference";
+
+    /// <summary>Maps legacy saved profiles (berthPreference / short codes).</summary>
+    [JsonPropertyName("berthPreference")]
+    public string? BerthPreferenceLegacy
+    {
+        get => null;
+        set
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                Berth = global::Booking.PassengerValueNormalizer.NormalizeBerth(value);
+            }
+        }
+    }
 }
 
 public enum SessionState

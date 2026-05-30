@@ -89,8 +89,9 @@ public partial class BookingSetupViewModel : ObservableObject
             {
                 Name = p.Name.Trim(),
                 Age = p.Age,
-                Gender = p.Gender.Trim(),
-                BerthPreference = p.BerthPreference.Trim()
+                Gender = PassengerFieldOptions.CoerceGender(p.Gender),
+                Country = PassengerFieldOptions.CoerceCountry(p.Country),
+                Berth = PassengerFieldOptions.CoerceBerth(p.Berth)
             }).ToList()
         };
 
@@ -104,8 +105,13 @@ public partial class BookingSetupViewModel : ObservableObject
         var errors = new List<string>();
         if (string.IsNullOrWhiteSpace(FromStation) || string.IsNullOrWhiteSpace(ToStation))
             errors.Add("From/To station cannot be empty.");
-        if (Passengers.Count == 0 || Passengers.Any(p => string.IsNullOrWhiteSpace(p.Name) || p.Age <= 0))
-            errors.Add("Add at least one valid passenger (Name + Age).");
+        if (Passengers.Count == 0 || Passengers.Any(p =>
+                string.IsNullOrWhiteSpace(p.Name) ||
+                p.Age <= 0 ||
+                string.IsNullOrWhiteSpace(p.Gender) ||
+                string.IsNullOrWhiteSpace(p.Country) ||
+                string.IsNullOrWhiteSpace(p.Berth)))
+            errors.Add("Add at least one valid passenger (name, age, gender, country, berth).");
         if (string.IsNullOrWhiteSpace(PreferredTrainNumbers) && string.IsNullOrWhiteSpace(ClassPriority))
             errors.Add("Train number or Class preference must be set.");
         if (JourneyDate.Date < DateTime.Today)
