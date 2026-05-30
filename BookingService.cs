@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net.Http;
 using System.Text;
@@ -14,6 +15,8 @@ public sealed class BookingService
     private const int DesktopViewportHeight = 1080;
     private const string IrctcJourneyDateFormat = "dd/MM/yyyy";
 
+    private readonly ConcurrentDictionary<string, ManualBrowserSession> _manualBrowserSessions = new();
+
     public event Action<ServiceLog>? LogEmitted;
 
     public async Task<BookingResult> StartBookingAsync(
@@ -23,14 +26,20 @@ public sealed class BookingService
     {
         IPage? page = null;
         BrowserSessionDiagnostics? browserSession = null;
+        IPlaywright? playwright = null;
+        IBrowser? browser = null;
+        IBrowserContext? context = null;
+        var keepBrowserOpen = false;
 
         try
         {
+            await DisposeManualBrowserForAccountAsync(account.Username);
+
             account.UpdateStatus("Initializing");
             Log(account.Username, "Info", "Launching browser session.");
 
-            using var playwright = await Playwright.CreateAsync();
-            await using var browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+            playwright = await Playwright.CreateAsync();
+            browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
             {
                 // Always run with a visible browser window for easier monitoring/debugging.
                 Headless = false,
@@ -42,7 +51,7 @@ public sealed class BookingService
                 ]
             });
 
-            await using var context = await browser.NewContextAsync(new BrowserNewContextOptions
+            context = await browser.NewContextAsync(new BrowserNewContextOptions
             {
                 IgnoreHTTPSErrors = true,
                 // Fixed desktop viewport so IRCTC shows the full header (LOGIN / REGISTER), not the mobile hamburger menu.
@@ -64,11 +73,23 @@ public sealed class BookingService
             await SearchTrainAsync(page, account, profile, cancellationToken);
             await EnterBookingLoopAsync(page, browserSession, account, profile, cancellationToken);
             await FillPassengersAsync(page, account, profile, cancellationToken);
-            await SolveCaptchaAndSubmitAsync(page, account, profile, cancellationToken);
+            await WaitForManualCaptchaPageAsync(page, account, cancellationToken);
 
-            account.UpdateStatus("PaymentReached");
-            Log(account.Username, "Success", "Booking reached payment page.");
-            return new BookingResult(BookingRunStatus.PaymentReached, "Reached payment page successfully.");
+            browserSession.End();
+            browserSession = null;
+            KeepManualBrowserOpen(account.Username, playwright, browser, context);
+            playwright = null;
+            browser = null;
+            context = null;
+            keepBrowserOpen = true;
+
+            account.UpdateStatus("Manual Captcha");
+            account.UpdateLastAction("Complete captcha manually in browser.");
+            Log(account.Username, "Info",
+                "Captcha page loaded. Complete captcha and payment manually — Chromium will stay open.");
+            return new BookingResult(
+                BookingRunStatus.AwaitingManualCaptcha,
+                "Complete captcha manually in the open browser window.");
         }
         catch (OperationCanceledException)
         {
@@ -93,7 +114,36 @@ public sealed class BookingService
         finally
         {
             browserSession?.End();
+            if (!keepBrowserOpen)
+            {
+                if (context is not null)
+                {
+                    await context.DisposeAsync();
+                }
+
+                if (browser is not null)
+                {
+                    await browser.DisposeAsync();
+                }
+
+                playwright?.Dispose();
+            }
         }
+    }
+
+    private void KeepManualBrowserOpen(string username, IPlaywright playwright, IBrowser browser, IBrowserContext context)
+    {
+        _manualBrowserSessions[username] = new ManualBrowserSession(playwright, browser, context);
+    }
+
+    private async Task DisposeManualBrowserForAccountAsync(string username)
+    {
+        if (!_manualBrowserSessions.TryRemove(username, out var session))
+        {
+            return;
+        }
+
+        await session.DisposeAsync();
     }
 
     private async Task LoginAsync(IPage page, AccountModel account, CancellationToken cancellationToken)
@@ -1351,6 +1401,102 @@ public sealed class BookingService
 
         account.UpdateLastAction("Passenger details entered.");
         Log(account.Username, "Success", $"Passenger details filled ({profile.Passengers.Count} row(s)).");
+        await ClickPassengerContinueAsync(page, account, cancellationToken);
+    }
+
+    private async Task ClickPassengerContinueAsync(
+        IPage page,
+        AccountModel account,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        account.UpdateLastAction("Clicking Continue on passenger page.");
+        Log(account.Username, "Info", "Passenger page: clicking Continue.");
+
+        var continueButton = page.Locator("button.train_Search.btnDefault[type='submit']")
+            .Filter(new LocatorFilterOptions
+            {
+                HasTextRegex = new Regex(@"^\s*Continue\s*$", RegexOptions.IgnoreCase)
+            });
+
+        if (await continueButton.CountAsync() == 0)
+        {
+            continueButton = page.Locator("button.train_Search.btnDefault[type='submit']")
+                .Filter(new LocatorFilterOptions { HasText = "Continue" });
+        }
+
+        if (await continueButton.CountAsync() == 0)
+        {
+            throw new BookingAutomationException(
+                "ClickPassengerContinue",
+                "Continue button (button.train_Search.btnDefault) was not found on the passenger page.");
+        }
+
+        var button = continueButton.First;
+        await button.WaitForAsync(new LocatorWaitForOptions
+        {
+            State = WaitForSelectorState.Visible,
+            Timeout = 15_000
+        });
+        await button.ScrollIntoViewIfNeededAsync();
+
+        try
+        {
+            await button.ClickAsync(new LocatorClickOptions { Force = true, Timeout = 5_000 });
+        }
+        catch (Exception)
+        {
+            await button.EvaluateAsync("node => node.click()");
+        }
+
+        await AcceptIrctcConfirmationIfPresentAsync(page, account, cancellationToken);
+        Log(account.Username, "Success", "Continue clicked on passenger page.");
+    }
+
+    private async Task WaitForManualCaptchaPageAsync(
+        IPage page,
+        AccountModel account,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        account.UpdateStatus("Captcha");
+        account.UpdateLastAction("Waiting for captcha page.");
+        Log(account.Username, "Info", "Waiting for captcha page after Continue.");
+
+        var captchaImage = page.Locator("img.captcha-img");
+        var captchaInput = page.Locator("input[formcontrolname='captcha']");
+
+        var captchaAppeared = false;
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        while (DateTime.UtcNow < deadline && !cancellationToken.IsCancellationRequested)
+        {
+            if (await captchaImage.CountAsync() > 0 && await captchaImage.First.IsVisibleAsync())
+            {
+                captchaAppeared = true;
+                break;
+            }
+
+            if (await captchaInput.CountAsync() > 0 && await captchaInput.First.IsVisibleAsync())
+            {
+                captchaAppeared = true;
+                break;
+            }
+
+            await Task.Delay(500, cancellationToken);
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (!captchaAppeared)
+        {
+            throw new BookingAutomationException(
+                "WaitForCaptcha",
+                "Captcha page did not appear after clicking Continue on the passenger page.");
+        }
+
+        Log(account.Username, "Success", "Captcha page detected.");
     }
 
     private static async Task ClickAddPassengerAsync(IPage page, CancellationToken cancellationToken)
@@ -1444,30 +1590,15 @@ public sealed class BookingService
         }
     }
 
-    private async Task SolveCaptchaAndSubmitAsync(
-        IPage page,
-        AccountModel account,
-        BookingProfile profile,
-        CancellationToken cancellationToken)
+    private sealed class ManualBrowserSession(IPlaywright playwright, IBrowser browser, IBrowserContext context)
+        : IAsyncDisposable
     {
-        account.UpdateStatus("Captcha");
-        account.UpdateLastAction("Waiting for captcha solve.");
-        Log(account.Username, "Info", "Solving captcha with 2Captcha.");
-
-        var captchaImage = page.Locator("img.captcha-img");
-        await captchaImage.WaitForAsync(new LocatorWaitForOptions { Timeout = profile.DefaultTimeoutMs });
-        var captchaBase64 = await captchaImage.EvaluateAsync<string>("img => img.src");
-        var solvedCaptcha = await SolveCaptchaAsync(captchaBase64, profile.TwoCaptchaApiKey, cancellationToken);
-
-        await page.FillAsync("input[formcontrolname='captcha']", solvedCaptcha);
-        await ClickWithFallbackAsync(page, "button:has-text('Continue')", cancellationToken);
-
-        await page.WaitForURLAsync("**/payment/**", new PageWaitForURLOptions
+        public async ValueTask DisposeAsync()
         {
-            Timeout = profile.DefaultTimeoutMs
-        });
-
-        account.UpdateLastAction("Payment page reached.");
+            await context.DisposeAsync();
+            await browser.DisposeAsync();
+            playwright.Dispose();
+        }
     }
 
     private static async Task<string> SolveCaptchaAsync(
@@ -1884,7 +2015,8 @@ public enum BookingRunStatus
 {
     Success,
     Failed,
-    PaymentReached
+    PaymentReached,
+    AwaitingManualCaptcha
 }
 
 public sealed record ServiceLog(string Username, string Level, string Message);

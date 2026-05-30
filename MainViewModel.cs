@@ -461,6 +461,7 @@ public partial class MainViewModel : ObservableObject
             {
                 BookingRunStatus.PaymentReached => "Ready",
                 BookingRunStatus.Success => "Ready",
+                BookingRunStatus.AwaitingManualCaptcha => "Manual Captcha",
                 _ => "Invalid"
             };
 
@@ -570,6 +571,7 @@ public partial class MainViewModel : ObservableObject
                 {
                     BookingRunStatus.PaymentReached => JobRuntimeStatus.PaymentPage,
                     BookingRunStatus.Success => JobRuntimeStatus.Success,
+                    BookingRunStatus.AwaitingManualCaptcha => JobRuntimeStatus.ManualCaptcha,
                     _ => JobRuntimeStatus.Failed
                 };
                 return;

@@ -101,6 +101,7 @@ public enum JobRuntimeStatus
     WaitingTatkal,
     Booking,
     PaymentPage,
+    ManualCaptcha,
     Failed,
     Success,
     Cancelled
